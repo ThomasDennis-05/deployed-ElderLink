@@ -1,4 +1,5 @@
 "use client";
+
 import { useState, useRef, useCallback } from "react";
 import { createClient } from "@supabase/supabase-js";
 
@@ -21,46 +22,71 @@ export default function FallDetectionPage() {
 
   function addLog(msg) {
     setLog((prev) =>
-      [{ time: new Date().toLocaleTimeString(), msg }, ...prev].slice(0, 20),
+      [
+        {
+          time: new Date().toLocaleTimeString(),
+          msg,
+        },
+        ...prev,
+      ].slice(0, 20),
     );
   }
 
-  async function sendFallEvent(status) {
+  async function sendFallEvent() {
     try {
       const { error } = await supabase.from("fall_events").insert({
         device_id: "PHONE-SIM-01",
         z_drop: 1.8,
         doppler_spike: 0,
-        status,
+        status: "unresolved",
       });
+
       if (error) {
         addLog(`Failed to send event: ${error.message}`);
         return false;
       }
-      addLog(`Event sent to database (status: ${status})`);
+
+      addLog("🚨 Fall alert sent to staff dashboard");
       return true;
     } catch (err) {
-      addLog(`Failed to send event: ${err.message}`);
+      const message = err instanceof Error ? err.message : "Unknown error";
+
+      addLog(`Failed to send event: ${message}`);
       return false;
     }
   }
 
   const triggerFallSequence = useCallback((source) => {
     setAlertActive((current) => {
-      if (current) return current; // already in alert state
-      addLog(`Fall pattern detected (${source})`);
+      if (current) {
+        return current;
+      }
+
+      addLog(`🚨 Fall pattern detected (${source})`);
       setCountdown(30);
 
+      if (countdownTimer.current) {
+        clearInterval(countdownTimer.current);
+      }
+
       countdownTimer.current = setInterval(() => {
-        setCountdown((c) => {
-          if (c <= 1) {
-            clearInterval(countdownTimer.current);
-            addLog("No response — auto-escalating to family");
-            sendFallEvent("escalated");
+        setCountdown((currentCountdown) => {
+          if (currentCountdown <= 1) {
+            if (countdownTimer.current) {
+              clearInterval(countdownTimer.current);
+              countdownTimer.current = null;
+            }
+
+            addLog("No response — sending alert to staff");
+
+            void sendFallEvent();
+
             setAlertActive(false);
+
             return 30;
           }
-          return c - 1;
+
+          return currentCountdown - 1;
         });
       }, 1000);
 
@@ -71,10 +97,14 @@ export default function FallDetectionPage() {
   const handleMotion = useCallback(
     (event) => {
       const acc = event.accelerationIncludingGravity;
-      if (!acc || acc.x === null) return;
+
+      if (!acc || acc.x === null || acc.y === null || acc.z === null) {
+        return;
+      }
 
       const mag =
         Math.sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z) / 9.81;
+
       setMagnitude(mag);
 
       if (mag > 2.5) {
@@ -86,7 +116,9 @@ export default function FallDetectionPage() {
         Date.now() - spikeDetectedAt.current < 2000
       ) {
         setMotionState("Stillness after spike");
+
         triggerFallSequence("accelerometer");
+
         spikeDetectedAt.current = null;
       } else {
         setMotionState("Normal");
@@ -101,19 +133,24 @@ export default function FallDetectionPage() {
       typeof DeviceMotionEvent.requestPermission === "function"
     ) {
       try {
-        const perm = await DeviceMotionEvent.requestPermission();
-        if (perm !== "granted") {
+        const permission = await DeviceMotionEvent.requestPermission();
+
+        if (permission !== "granted") {
           addLog("Motion permission denied");
           return;
         }
       } catch (err) {
-        addLog("Permission request failed: " + err.message);
+        const message = err instanceof Error ? err.message : "Unknown error";
+
+        addLog(`Permission request failed: ${message}`);
         return;
       }
     }
 
     motionHandlerRef.current = handleMotion;
+
     window.addEventListener("devicemotion", motionHandlerRef.current);
+
     setMonitoring(true);
     addLog("Monitoring started");
   }
@@ -121,24 +158,50 @@ export default function FallDetectionPage() {
   function stopMonitoring() {
     if (motionHandlerRef.current) {
       window.removeEventListener("devicemotion", motionHandlerRef.current);
+
+      motionHandlerRef.current = null;
     }
+
+    if (countdownTimer.current) {
+      clearInterval(countdownTimer.current);
+      countdownTimer.current = null;
+    }
+
     setMonitoring(false);
     setMagnitude(null);
     setMotionState("—");
+    setAlertActive(false);
+    setCountdown(30);
+
     addLog("Monitoring stopped");
   }
 
   function handleImOk() {
-    clearInterval(countdownTimer.current);
-    addLog("Marked as 'I'm OK' — no alert sent");
+    if (countdownTimer.current) {
+      clearInterval(countdownTimer.current);
+      countdownTimer.current = null;
+    }
+
     setAlertActive(false);
+    setCountdown(30);
+
+    addLog("I'm OK — no alert sent");
   }
 
   async function handleSendAlert() {
-    clearInterval(countdownTimer.current);
-    await sendFallEvent("confirmed");
-    addLog("Alert manually confirmed and sent");
+    if (countdownTimer.current) {
+      clearInterval(countdownTimer.current);
+      countdownTimer.current = null;
+    }
+
+    const success = await sendFallEvent();
+
+    if (success) {
+      addLog("Alert confirmed and sent to staff");
+    }
+
     setAlertActive(false);
+    setCountdown(30);
   }
 
   return (
@@ -153,7 +216,14 @@ export default function FallDetectionPage() {
       <h1 style={{ fontSize: 20, marginBottom: 4 }}>
         ElderLink Fall Detection
       </h1>
-      <p style={{ color: "#666", fontSize: 13, marginBottom: 20 }}>
+
+      <p
+        style={{
+          color: "#666",
+          fontSize: 13,
+          marginBottom: 20,
+        }}
+      >
         Phone accelerometer acting as an in-room sensor
       </p>
 
@@ -165,9 +235,15 @@ export default function FallDetectionPage() {
           marginBottom: 16,
         }}
       >
-        <div style={{ marginBottom: 12, fontWeight: 600 }}>
+        <div
+          style={{
+            marginBottom: 12,
+            fontWeight: 600,
+          }}
+        >
           {monitoring ? "🟢 Monitoring" : "⚪ Not monitoring"}
         </div>
+
         <div
           style={{
             display: "flex",
@@ -178,10 +254,12 @@ export default function FallDetectionPage() {
           }}
         >
           <span style={{ color: "#666" }}>Acceleration magnitude</span>
+
           <span style={{ fontWeight: 600 }}>
-            {magnitude !== null ? magnitude.toFixed(2) + " g" : "—"}
+            {magnitude !== null ? `${magnitude.toFixed(2)} g` : "—"}
           </span>
         </div>
+
         <div
           style={{
             display: "flex",
@@ -191,8 +269,10 @@ export default function FallDetectionPage() {
           }}
         >
           <span style={{ color: "#666" }}>Motion state</span>
+
           <span style={{ fontWeight: 600 }}>{motionState}</span>
         </div>
+
         <button
           onClick={monitoring ? stopMonitoring : startMonitoring}
           style={{
@@ -208,6 +288,7 @@ export default function FallDetectionPage() {
         >
           {monitoring ? "Stop Monitoring" : "Start Monitoring"}
         </button>
+
         <button
           onClick={() => triggerFallSequence("test button")}
           disabled={!monitoring}
@@ -236,13 +317,35 @@ export default function FallDetectionPage() {
             textAlign: "center",
           }}
         >
-          <h2 style={{ color: "#dc2626", margin: "0 0 6px", fontSize: 16 }}>
+          <h2
+            style={{
+              color: "#dc2626",
+              margin: "0 0 6px",
+              fontSize: 16,
+            }}
+          >
             Potential Fall Detected
           </h2>
-          <p style={{ margin: 0, fontSize: 13 }}>Are you okay?</p>
-          <div style={{ fontSize: 32, fontWeight: 700, margin: "8px 0" }}>
+
+          <p
+            style={{
+              margin: 0,
+              fontSize: 13,
+            }}
+          >
+            Are you okay?
+          </p>
+
+          <div
+            style={{
+              fontSize: 32,
+              fontWeight: 700,
+              margin: "8px 0",
+            }}
+          >
             {countdown}
           </div>
+
           <button
             onClick={handleImOk}
             style={{
@@ -258,6 +361,7 @@ export default function FallDetectionPage() {
           >
             I&apos;m OK
           </button>
+
           <button
             onClick={handleSendAlert}
             style={{
@@ -276,16 +380,40 @@ export default function FallDetectionPage() {
         </div>
       )}
 
-      <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 14 }}>
-        <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>
+      <div
+        style={{
+          border: "1px solid #ddd",
+          borderRadius: 12,
+          padding: 14,
+        }}
+      >
+        <div
+          style={{
+            fontWeight: 600,
+            fontSize: 13,
+            marginBottom: 8,
+          }}
+        >
           Activity Log
         </div>
-        <div style={{ maxHeight: 160, overflowY: "auto" }}>
+
+        <div
+          style={{
+            maxHeight: 160,
+            overflowY: "auto",
+          }}
+        >
           {log.length === 0 && (
-            <div style={{ fontSize: 12, color: "#888" }}>
+            <div
+              style={{
+                fontSize: 12,
+                color: "#888",
+              }}
+            >
               Waiting to start...
             </div>
           )}
+
           {log.map((entry, i) => (
             <div
               key={i}
