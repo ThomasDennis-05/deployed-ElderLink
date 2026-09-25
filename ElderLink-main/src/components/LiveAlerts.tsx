@@ -1,4 +1,3 @@
-```tsx
 "use client";
 
 import { useEffect, useState } from "react";
@@ -23,14 +22,8 @@ export default function LiveAlerts() {
   const [alerts, setAlerts] = useState<FallEvent[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // ---------------------------------------------------------
-  // FORMAT DEVICE NAME
-  // ---------------------------------------------------------
-
   function formatDevice(deviceId: string) {
-    if (!deviceId) {
-      return "Phone";
-    }
+    if (!deviceId) return "Phone";
 
     if (
       deviceId.toLowerCase().includes("phone") ||
@@ -41,10 +34,6 @@ export default function LiveAlerts() {
 
     return deviceId;
   }
-
-  // ---------------------------------------------------------
-  // LOAD EXISTING UNRESOLVED ALERTS
-  // ---------------------------------------------------------
 
   useEffect(() => {
     async function loadAlerts() {
@@ -78,8 +67,7 @@ export default function LiveAlerts() {
         triggered_at: event.triggered_at,
         status: event.status,
         resident_id: event.resident_id,
-        resident_name:
-          event.residents?.full_name || "Unknown resident",
+        resident_name: event.residents?.full_name || "Unknown resident",
         room_number: event.residents?.room_number || null,
       }));
 
@@ -90,14 +78,9 @@ export default function LiveAlerts() {
     loadAlerts();
   }, []);
 
-  // ---------------------------------------------------------
-  // REALTIME NEW ALERTS
-  // ---------------------------------------------------------
-
   useEffect(() => {
     const channel = supabase
       .channel("live-fall-alerts")
-
       .on(
         "postgres_changes",
         {
@@ -109,7 +92,7 @@ export default function LiveAlerts() {
           const event = payload.new as FallEvent;
 
           let residentName = "Unknown resident";
-          let roomNumber = null;
+          let roomNumber: string | null = null;
 
           if (event.resident_id) {
             const { data: resident, error } = await supabase
@@ -135,7 +118,6 @@ export default function LiveAlerts() {
           };
 
           setAlerts((current) => {
-            // Prevent duplicate alerts
             if (current.some((alert) => alert.id === newAlert.id)) {
               return current;
             }
@@ -144,7 +126,6 @@ export default function LiveAlerts() {
           });
         },
       )
-
       .on(
         "postgres_changes",
         {
@@ -155,7 +136,6 @@ export default function LiveAlerts() {
         async (payload) => {
           const event = payload.new as FallEvent;
 
-          // Remove acknowledged/resolved alerts
           if (event.status !== "unresolved") {
             setAlerts((current) =>
               current.filter((alert) => alert.id !== event.id),
@@ -165,7 +145,7 @@ export default function LiveAlerts() {
           }
 
           let residentName = "Unknown resident";
-          let roomNumber = null;
+          let roomNumber: string | null = null;
 
           if (event.resident_id) {
             const { data: resident, error } = await supabase
@@ -197,17 +177,12 @@ export default function LiveAlerts() {
           );
         },
       )
-
       .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
   }, []);
-
-  // ---------------------------------------------------------
-  // ACKNOWLEDGE ALERT
-  // ---------------------------------------------------------
 
   async function acknowledgeAlert(id: string) {
     const { error } = await supabase
@@ -223,27 +198,11 @@ export default function LiveAlerts() {
       return;
     }
 
-    setAlerts((current) =>
-      current.filter((alert) => alert.id !== id),
-    );
+    setAlerts((current) => current.filter((alert) => alert.id !== id));
   }
-
-  // ---------------------------------------------------------
-  // FORMAT TIME
-  // ---------------------------------------------------------
-
-  function formatTime(timestamp: string) {
-    return new Date(timestamp).toLocaleString();
-  }
-
-  // ---------------------------------------------------------
-  // UI
-  // ---------------------------------------------------------
 
   return (
     <div className="rounded-2xl border border-red-200 bg-white p-5 shadow-sm">
-      {/* HEADER */}
-
       <div className="mb-5 flex items-start justify-between gap-4">
         <div>
           <h2 className="text-xl font-bold text-red-700">
@@ -258,51 +217,37 @@ export default function LiveAlerts() {
         <div className="flex shrink-0 items-center gap-2">
           <span
             className={`h-3 w-3 rounded-full ${
-              alerts.length > 0
-                ? "bg-red-500"
-                : "bg-green-500"
+              alerts.length > 0 ? "bg-red-500" : "bg-green-500"
             }`}
           />
 
           <span className="text-sm font-bold">
-            {alerts.length > 0
-              ? `${alerts.length} Active`
-              : "All Clear"}
+            {alerts.length > 0 ? `${alerts.length} Active` : "All Clear"}
           </span>
         </div>
       </div>
-
-      {/* LOADING */}
 
       {loading ? (
         <div className="rounded-xl bg-gray-50 py-10 text-center text-sm text-gray-500">
           Loading alerts...
         </div>
       ) : alerts.length === 0 ? (
-        /* ALL CLEAR */
-
         <div className="rounded-xl border border-green-200 bg-green-50 p-8 text-center">
           <div className="text-4xl">✅</div>
 
-          <p className="mt-3 font-bold text-green-700">
-            All Clear
-          </p>
+          <p className="mt-3 font-bold text-green-700">All Clear</p>
 
           <p className="mt-1 text-sm text-green-600">
             Monitoring rooms for fall alerts...
           </p>
         </div>
       ) : (
-        /* ACTIVE ALERTS */
-
         <div className="space-y-4">
           {alerts.map((alert) => (
             <div
               key={alert.id}
               className="overflow-hidden rounded-2xl border-2 border-red-300 bg-red-50"
             >
-              {/* ALERT HEADER */}
-
               <div className="border-b border-red-200 bg-red-100 px-5 py-4">
                 <div className="flex items-start justify-between gap-3">
                   <div>
@@ -322,8 +267,6 @@ export default function LiveAlerts() {
               </div>
 
               <div className="p-5">
-                {/* RESIDENT */}
-
                 <div className="rounded-xl border border-red-100 bg-white p-4 shadow-sm">
                   <p className="text-xs font-bold uppercase tracking-wider text-gray-400">
                     Resident
@@ -339,8 +282,6 @@ export default function LiveAlerts() {
                     </p>
                   )}
                 </div>
-
-                {/* DETAILS */}
 
                 <div className="mt-4 grid grid-cols-2 gap-3">
                   <div className="rounded-xl bg-white p-4">
@@ -359,23 +300,17 @@ export default function LiveAlerts() {
                     </p>
 
                     <p className="mt-1 font-bold text-gray-900">
-                      {new Date(
-                        alert.triggered_at,
-                      ).toLocaleTimeString([], {
+                      {new Date(alert.triggered_at).toLocaleTimeString([], {
                         hour: "2-digit",
                         minute: "2-digit",
                       })}
                     </p>
 
                     <p className="mt-1 text-xs text-gray-500">
-                      {new Date(
-                        alert.triggered_at,
-                      ).toLocaleDateString()}
+                      {new Date(alert.triggered_at).toLocaleDateString()}
                     </p>
                   </div>
                 </div>
-
-                {/* ACKNOWLEDGE */}
 
                 <button
                   onClick={() => acknowledgeAlert(alert.id)}
@@ -391,4 +326,3 @@ export default function LiveAlerts() {
     </div>
   );
 }
-            
