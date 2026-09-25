@@ -20,6 +20,8 @@ export default function FallDetectionPage() {
   const [alertActive, setAlertActive] = useState(false);
   const [countdown, setCountdown] = useState(30);
 
+  const [sendingAlert, setSendingAlert] = useState(false);
+
   const [log, setLog] = useState([]);
 
   const spikeDetectedAt = useRef(null);
@@ -78,7 +80,7 @@ export default function FallDetectionPage() {
   );
 
   // ---------------------------------------------------------
-  // SEND FALL EVENT
+  // SEND FALL EVENT TO STAFF DASHBOARD
   // ---------------------------------------------------------
 
   async function sendFallEvent() {
@@ -97,22 +99,150 @@ export default function FallDetectionPage() {
       });
 
       if (error) {
-        addLog(`Failed to send event: ${error.message}`);
         console.error("Fall event error:", error);
+        addLog(`Failed to send staff alert: ${error.message}`);
         return false;
       }
 
       addLog(
-        `🚨 Fall alert sent for ${selectedResident?.full_name || "resident"}`,
+        `🚨 Staff alert sent for ${selectedResident?.full_name || "resident"}`,
       );
 
       return true;
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
 
-      addLog(`Failed to send event: ${message}`);
+      addLog(`Failed to send staff alert: ${message}`);
 
       return false;
+    }
+  }
+
+  // ---------------------------------------------------------
+  // SEND AUTOMATIC SOS
+  // ---------------------------------------------------------
+
+  async function sendAutomaticSOS() {
+    if (!selectedResidentId) {
+      addLog("Cannot send SOS — no resident selected");
+      return false;
+    }
+
+    setSendingAlert(true);
+
+    try {
+      addLog(
+        `📢 Sending SOS to ${selectedResident?.full_name || "family contact"}...`,
+      );
+
+      const response = await fetch("/api/emergency-alert", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          residentId: selectedResidentId,
+          alertType: "Fall",
+          channels: ["sms", "whatsapp", "voice"],
+        }),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.error || "SOS request failed");
+      }
+
+      const sentChannels = result.sentChannels || [];
+      const failedChannels = result.failedChannels || [];
+
+      if (sentChannels.includes("sms")) {
+        addLog("✅ SMS SOS sent");
+      }
+
+      if (sentChannels.includes("whatsapp")) {
+        addLog("✅ WhatsApp SOS sent");
+      }
+
+      if (sentChannels.includes("voice")) {
+        addLog("✅ SOS phone call started");
+      }
+
+      if (failedChannels.includes("sms")) {
+        addLog("⚠️ SMS SOS failed");
+      }
+
+      if (failedChannels.includes("whatsapp")) {
+        addLog("⚠️ WhatsApp SOS failed");
+      }
+
+      if (failedChannels.includes("voice")) {
+        addLog("⚠️ SOS phone call failed");
+      }
+
+      if (sentChannels.length === 0) {
+        addLog("❌ No SOS channels were successfully sent");
+        return false;
+      }
+
+      addLog(
+        `🚨 SOS completed: ${sentChannels
+          .map((channel) => {
+            if (channel === "sms") return "SMS";
+            if (channel === "whatsapp") return "WhatsApp";
+            if (channel === "voice") return "Call";
+            return channel;
+          })
+          .join(", ")}`,
+      );
+
+      return true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+
+      console.error("Automatic SOS error:", err);
+
+      addLog(`❌ Automatic SOS failed: ${message}`);
+
+      return false;
+    } finally {
+      setSendingAlert(false);
+    }
+  }
+
+  // ---------------------------------------------------------
+  // SEND EVERYTHING
+  // ---------------------------------------------------------
+
+  async function sendCompleteEmergencyAlert() {
+    if (!selectedResidentId) {
+      addLog("Please select a resident first");
+      return;
+    }
+
+    /*
+     * First send the fall event to Supabase.
+     * This allows the staff dashboard realtime subscription
+     * to receive the emergency immediately.
+     */
+    const staffAlertSent = await sendFallEvent();
+
+    /*
+     * Then call the existing emergency-alert API.
+     * That API handles:
+     *
+     * SMS
+     * WhatsApp
+     * Voice call
+     */
+    const sosSent = await sendAutomaticSOS();
+
+    if (staffAlertSent && sosSent) {
+      addLog("🚨 Complete emergency alert sent");
+    } else if (staffAlertSent) {
+      addLog("⚠️ Staff alerted, but SOS delivery had a problem");
+    } else if (sosSent) {
+      addLog("⚠️ SOS sent, but staff dashboard alert had a problem");
     }
   }
 
@@ -128,6 +258,7 @@ export default function FallDetectionPage() {
         }
 
         addLog(`🚨 Fall pattern detected (${source})`);
+
         setCountdown(30);
 
         if (countdownTimer.current) {
@@ -142,9 +273,9 @@ export default function FallDetectionPage() {
                 countdownTimer.current = null;
               }
 
-              addLog("No response — sending alert to staff");
+              addLog("⏰ No response — sending emergency SOS");
 
-              void sendFallEvent();
+              void sendCompleteEmergencyAlert();
 
               setAlertActive(false);
 
@@ -238,7 +369,7 @@ export default function FallDetectionPage() {
     setMonitoring(true);
 
     addLog(
-      `Monitoring started for ${
+      `🟢 Monitoring started for ${
         selectedResident?.full_name || "selected resident"
       }`,
     );
@@ -290,18 +421,19 @@ export default function FallDetectionPage() {
   // ---------------------------------------------------------
 
   async function handleSendAlert() {
+    if (sendingAlert) {
+      return;
+    }
+
     if (countdownTimer.current) {
       clearInterval(countdownTimer.current);
       countdownTimer.current = null;
     }
 
-    const success = await sendFallEvent();
-
-    if (success) {
-      addLog("Alert confirmed and sent to staff");
-    }
-
     setAlertActive(false);
+
+    await sendCompleteEmergencyAlert();
+
     setCountdown(30);
   }
 
@@ -493,7 +625,7 @@ export default function FallDetectionPage() {
 
         <button
           onClick={() => triggerFallSequence("test simulation")}
-          disabled={!monitoring || !selectedResidentId}
+          disabled={!monitoring || !selectedResidentId || sendingAlert}
           style={{
             width: "100%",
             padding: 12,
@@ -503,7 +635,8 @@ export default function FallDetectionPage() {
             background: "white",
             color: "#dc2626",
             fontWeight: 700,
-            opacity: monitoring && selectedResidentId ? 1 : 0.5,
+            opacity:
+              monitoring && selectedResidentId && !sendingAlert ? 1 : 0.5,
           }}
         >
           🚨 Simulate Fall
@@ -587,6 +720,7 @@ export default function FallDetectionPage() {
 
           <button
             onClick={handleImOk}
+            disabled={sendingAlert}
             style={{
               width: "100%",
               padding: 12,
@@ -603,6 +737,7 @@ export default function FallDetectionPage() {
 
           <button
             onClick={handleSendAlert}
+            disabled={sendingAlert}
             style={{
               width: "100%",
               padding: 12,
@@ -614,7 +749,7 @@ export default function FallDetectionPage() {
               fontWeight: 600,
             }}
           >
-            Send Alert Now
+            {sendingAlert ? "Sending Emergency Alert..." : "🚨 Send Alert Now"}
           </button>
         </div>
       )}
@@ -642,7 +777,7 @@ export default function FallDetectionPage() {
 
         <div
           style={{
-            maxHeight: 160,
+            maxHeight: 220,
             overflowY: "auto",
           }}
         >
@@ -663,7 +798,7 @@ export default function FallDetectionPage() {
               style={{
                 fontSize: 12,
                 color: "#666",
-                padding: "3px 0",
+                padding: "4px 0",
                 borderBottom: "1px dashed #eee",
               }}
             >
