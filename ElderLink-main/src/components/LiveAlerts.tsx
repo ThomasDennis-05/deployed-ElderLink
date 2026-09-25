@@ -3,12 +3,15 @@
 import { useEffect, useState } from "react";
 import { createBrowserClient } from "@supabase/ssr";
 
-interface FallEvent {
+type FallEvent = {
   id: string;
   device_id: string;
   triggered_at: string;
   status: string;
-}
+  resident_id: string | null;
+  resident_name?: string;
+  room_number?: string | null;
+};
 
 const supabase = createBrowserClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -18,35 +21,59 @@ const supabase = createBrowserClient(
 export default function LiveAlerts() {
   const [alerts, setAlerts] = useState<FallEvent[]>([]);
   const [loading, setLoading] = useState(true);
-  const [connectionStatus, setConnectionStatus] = useState("Connecting...");
+
+  // ---------------------------------------------------------
+  // LOAD EXISTING UNRESOLVED ALERTS
+  // ---------------------------------------------------------
 
   useEffect(() => {
-    let mounted = true;
-
-    async function loadExisting() {
+    async function loadAlerts() {
       const { data, error } = await supabase
         .from("fall_events")
-        .select("id, device_id, triggered_at, status")
+        .select(
+          `
+          id,
+          device_id,
+          triggered_at,
+          status,
+          resident_id,
+          residents (
+            full_name,
+            room_number
+          )
+        `,
+        )
         .eq("status", "unresolved")
-        .order("triggered_at", {
-          ascending: false,
-        });
-
-      if (!mounted) {
-        return;
-      }
+        .order("triggered_at", { ascending: false });
 
       if (error) {
         console.error("Failed to load fall alerts:", error);
-      } else if (data) {
-        setAlerts(data as FallEvent[]);
+        setLoading(false);
+        return;
       }
 
+      const formattedAlerts = (data || []).map((event: any) => ({
+        id: event.id,
+        device_id: event.device_id,
+        triggered_at: event.triggered_at,
+        status: event.status,
+        resident_id: event.resident_id,
+        resident_name: event.residents?.full_name || "Unknown resident",
+        room_number: event.residents?.room_number || null,
+      }));
+
+      setAlerts(formattedAlerts);
       setLoading(false);
     }
 
-    void loadExisting();
+    loadAlerts();
+  }, []);
 
+  // ---------------------------------------------------------
+  // REALTIME NEW ALERTS
+  // ---------------------------------------------------------
+
+  useEffect(() => {
     const channel = supabase
       .channel("live-fall-alerts")
       .on(
@@ -56,32 +83,36 @@ export default function LiveAlerts() {
           schema: "public",
           table: "fall_events",
         },
-        (payload) => {
-          console.log("🚨 NEW FALL EVENT:", payload.new);
+        async (payload) => {
+          const event = payload.new as FallEvent;
 
-          const newAlert = payload.new as FallEvent;
+          let residentName = "Unknown resident";
+          let roomNumber = null;
 
-          if (newAlert.status !== "unresolved") {
-            return;
-          }
+          if (event.resident_id) {
+            const { data: resident, error } = await supabase
+              .from("residents")
+              .select("full_name, room_number")
+              .eq("id", event.resident_id)
+              .single();
 
-          setAlerts((currentAlerts) => {
-            if (currentAlerts.some((alert) => alert.id === newAlert.id)) {
-              return currentAlerts;
+            if (!error && resident) {
+              residentName = resident.full_name;
+              roomNumber = resident.room_number;
             }
-
-            return [newAlert, ...currentAlerts];
-          });
-
-          if (
-            typeof window !== "undefined" &&
-            "Notification" in window &&
-            Notification.permission === "granted"
-          ) {
-            new Notification("🚨 ElderLink Fall Alert", {
-              body: `Fall detected from ${newAlert.device_id}`,
-            });
           }
+
+          const newAlert: FallEvent = {
+            id: event.id,
+            device_id: event.device_id,
+            triggered_at: event.triggered_at,
+            status: event.status,
+            resident_id: event.resident_id,
+            resident_name: residentName,
+            room_number: roomNumber,
+          };
+
+          setAlerts((current) => [newAlert, ...current]);
         },
       )
       .on(
@@ -91,57 +122,62 @@ export default function LiveAlerts() {
           schema: "public",
           table: "fall_events",
         },
-        (payload) => {
-          const updated = payload.new as FallEvent;
+        async (payload) => {
+          const event = payload.new as FallEvent;
 
-          setAlerts((currentAlerts) => {
-            if (updated.status === "unresolved") {
-              const exists = currentAlerts.some(
-                (alert) => alert.id === updated.id,
-              );
+          if (event.status !== "unresolved") {
+            setAlerts((current) =>
+              current.filter((alert) => alert.id !== event.id),
+            );
 
-              if (exists) {
-                return currentAlerts.map((alert) =>
-                  alert.id === updated.id ? updated : alert,
-                );
-              }
+            return;
+          }
 
-              return [updated, ...currentAlerts];
+          let residentName = "Unknown resident";
+          let roomNumber = null;
+
+          if (event.resident_id) {
+            const { data: resident, error } = await supabase
+              .from("residents")
+              .select("full_name, room_number")
+              .eq("id", event.resident_id)
+              .single();
+
+            if (!error && resident) {
+              residentName = resident.full_name;
+              roomNumber = resident.room_number;
             }
+          }
 
-            return currentAlerts.filter((alert) => alert.id !== updated.id);
-          });
+          const updatedAlert: FallEvent = {
+            id: event.id,
+            device_id: event.device_id,
+            triggered_at: event.triggered_at,
+            status: event.status,
+            resident_id: event.resident_id,
+            resident_name: residentName,
+            room_number: roomNumber,
+          };
+
+          setAlerts((current) =>
+            current.map((alert) =>
+              alert.id === updatedAlert.id ? updatedAlert : alert,
+            ),
+          );
         },
       )
-      .subscribe((status) => {
-        console.log("Fall alert realtime status:", status);
-
-        if (!mounted) {
-          return;
-        }
-
-        if (status === "SUBSCRIBED") {
-          setConnectionStatus("🟢 Live monitoring connected");
-        } else if (status === "CHANNEL_ERROR") {
-          setConnectionStatus("🔴 Live monitoring connection error");
-        } else if (status === "TIMED_OUT") {
-          setConnectionStatus("🟠 Live monitoring timed out");
-        } else {
-          setConnectionStatus(status);
-        }
-      });
+      .subscribe();
 
     return () => {
-      mounted = false;
-      void supabase.removeChannel(channel);
+      supabase.removeChannel(channel);
     };
   }, []);
 
-  async function handleAcknowledge(id: string) {
-    setAlerts((currentAlerts) =>
-      currentAlerts.filter((alert) => alert.id !== id),
-    );
+  // ---------------------------------------------------------
+  // ACKNOWLEDGE ALERT
+  // ---------------------------------------------------------
 
+  async function acknowledgeAlert(id: string) {
     const { error } = await supabase
       .from("fall_events")
       .update({
@@ -152,99 +188,129 @@ export default function LiveAlerts() {
 
     if (error) {
       console.error("Failed to acknowledge alert:", error);
-    }
-  }
-
-  async function enableNotifications() {
-    if (typeof window === "undefined" || !("Notification" in window)) {
       return;
     }
 
-    const permission = await Notification.requestPermission();
-
-    if (permission === "granted") {
-      setConnectionStatus(
-        "🟢 Live monitoring connected • Notifications enabled",
-      );
-    }
+    setAlerts((current) => current.filter((alert) => alert.id !== id));
   }
 
-  const notificationsAvailable =
-    typeof window !== "undefined" && "Notification" in window;
+  // ---------------------------------------------------------
+  // FORMAT TIME
+  // ---------------------------------------------------------
 
-  const notificationsEnabled =
-    notificationsAvailable && Notification.permission === "granted";
+  function formatTime(timestamp: string) {
+    return new Date(timestamp).toLocaleString();
+  }
+
+  // ---------------------------------------------------------
+  // UI
+  // ---------------------------------------------------------
 
   return (
-    <div className="p-6 bg-red-50 rounded-xl border border-red-200">
-      <div className="flex items-start justify-between gap-4 mb-4">
+    <div className="rounded-xl border border-red-200 bg-white p-5 shadow-sm">
+      <div className="mb-4 flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold text-red-700 animate-pulse">
-            Live Emergency Dashboard
+          <h2 className="text-lg font-bold text-red-700">
+            🚨 Emergency Dashboard
           </h2>
 
-          <p className="text-xs text-gray-600 mt-1">{connectionStatus}</p>
+          <p className="text-sm text-gray-500">Live fall detection alerts</p>
         </div>
 
-        {notificationsAvailable && !notificationsEnabled && (
-          <button
-            onClick={enableNotifications}
-            className="text-xs px-3 py-2 rounded-lg bg-white border border-red-200 text-red-700 font-semibold hover:bg-red-100"
-          >
-            Enable notifications
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          <span
+            className={`h-3 w-3 rounded-full ${
+              alerts.length > 0 ? "bg-red-500" : "bg-green-500"
+            }`}
+          />
+
+          <span className="text-sm font-medium">
+            {alerts.length > 0 ? `${alerts.length} Active` : "All Clear"}
+          </span>
+        </div>
       </div>
 
       {loading ? (
-        <p className="text-gray-400 text-sm">Loading alerts...</p>
+        <div className="py-8 text-center text-sm text-gray-500">
+          Loading alerts...
+        </div>
       ) : alerts.length === 0 ? (
-        <div className="bg-white rounded-lg p-4 border border-green-200">
-          <p className="text-green-700 font-medium">
-            All clear. Monitoring rooms...
+        <div className="rounded-lg bg-green-50 p-6 text-center">
+          <div className="text-3xl">✅</div>
+
+          <p className="mt-2 font-semibold text-green-700">All clear</p>
+
+          <p className="text-sm text-green-600">
+            Monitoring rooms for fall alerts...
           </p>
         </div>
       ) : (
-        <ul className="space-y-4">
+        <div className="space-y-4">
           {alerts.map((alert) => (
-            <li
+            <div
               key={alert.id}
-              className="p-4 bg-white border-2 border-red-300 rounded-lg shadow-md"
+              className="rounded-xl border-2 border-red-300 bg-red-50 p-5"
             >
-              <div className="flex justify-between items-center gap-3">
-                <span className="font-bold text-lg text-gray-900">
-                  🚨 Fall Detected
-                </span>
+              <div className="mb-3 flex items-start justify-between">
+                <div>
+                  <h3 className="text-lg font-bold text-red-700">
+                    🚨 Fall Detected
+                  </h3>
 
-                <span className="text-sm font-medium text-red-600 bg-red-100 px-3 py-1 rounded-full">
-                  Action Required
+                  <p className="text-sm font-semibold text-red-600">
+                    Action Required
+                  </p>
+                </div>
+
+                <span className="rounded-full bg-red-200 px-3 py-1 text-xs font-bold text-red-800">
+                  {alert.status}
                 </span>
               </div>
 
-              <div className="mt-3 space-y-1">
-                <p className="text-sm text-gray-700">
-                  <strong>Device:</strong> {alert.device_id}
+              {/* RESIDENT NAME */}
+              <div className="mb-4 rounded-lg bg-white p-4 shadow-sm">
+                <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                  Resident
                 </p>
 
-                <p className="text-sm text-gray-500">
-                  <strong>Time:</strong>{" "}
-                  {new Date(alert.triggered_at).toLocaleString()}
+                <p className="mt-1 text-xl font-bold text-gray-900">
+                  {alert.resident_name || "Unknown resident"}
                 </p>
 
-                <p className="text-sm text-red-600 font-semibold">
-                  Status: Unresolved
-                </p>
+                {alert.room_number && (
+                  <p className="mt-1 text-sm text-gray-600">
+                    Room {alert.room_number}
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between">
+                  <span className="font-medium text-gray-500">Device</span>
+
+                  <span className="font-semibold text-gray-900">
+                    {alert.device_id}
+                  </span>
+                </div>
+
+                <div className="flex justify-between">
+                  <span className="font-medium text-gray-500">Time</span>
+
+                  <span className="font-semibold text-gray-900">
+                    {formatTime(alert.triggered_at)}
+                  </span>
+                </div>
               </div>
 
               <button
-                onClick={() => handleAcknowledge(alert.id)}
-                className="mt-4 w-full py-2.5 rounded-lg bg-[#357366] text-white text-sm font-semibold hover:bg-[#2c5f54] transition-all active:scale-95"
+                onClick={() => acknowledgeAlert(alert.id)}
+                className="mt-5 w-full rounded-lg bg-green-600 px-4 py-3 font-semibold text-white hover:bg-green-700"
               >
-                Acknowledge Fall
+                ✓ Acknowledge Alert
               </button>
-            </li>
+            </div>
           ))}
-        </ul>
+        </div>
       )}
     </div>
   );
