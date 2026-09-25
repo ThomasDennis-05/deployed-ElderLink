@@ -21,6 +21,7 @@ export default function FallDetectionPage() {
   const [countdown, setCountdown] = useState(30);
 
   const [sendingAlert, setSendingAlert] = useState(false);
+  const [alertSent, setAlertSent] = useState(false);
 
   const [log, setLog] = useState([]);
 
@@ -92,7 +93,10 @@ export default function FallDetectionPage() {
     try {
       const { error } = await supabase.from("fall_events").insert({
         resident_id: selectedResidentId,
-        device_id: "PHONE-SIM-01",
+
+        // Store a simple device name instead of PHONE-SIM-01
+        device_id: "PHONE",
+
         z_drop: 1.8,
         doppler_spike: 0,
         status: "unresolved",
@@ -132,7 +136,9 @@ export default function FallDetectionPage() {
 
     try {
       addLog(
-        `📢 Sending SOS to ${selectedResident?.full_name || "family contact"}...`,
+        `📢 Sending SOS to ${
+          selectedResident?.full_name || "family contact"
+        }...`,
       );
 
       const response = await fetch("/api/emergency-alert", {
@@ -217,24 +223,14 @@ export default function FallDetectionPage() {
   async function sendCompleteEmergencyAlert() {
     if (!selectedResidentId) {
       addLog("Please select a resident first");
-      return;
+      return {
+        staffAlertSent: false,
+        sosSent: false,
+      };
     }
 
-    /*
-     * First send the fall event to Supabase.
-     * This allows the staff dashboard realtime subscription
-     * to receive the emergency immediately.
-     */
     const staffAlertSent = await sendFallEvent();
 
-    /*
-     * Then call the existing emergency-alert API.
-     * That API handles:
-     *
-     * SMS
-     * WhatsApp
-     * Voice call
-     */
     const sosSent = await sendAutomaticSOS();
 
     if (staffAlertSent && sosSent) {
@@ -244,6 +240,11 @@ export default function FallDetectionPage() {
     } else if (sosSent) {
       addLog("⚠️ SOS sent, but staff dashboard alert had a problem");
     }
+
+    return {
+      staffAlertSent,
+      sosSent,
+    };
   }
 
   // ---------------------------------------------------------
@@ -256,6 +257,8 @@ export default function FallDetectionPage() {
         if (current) {
           return current;
         }
+
+        setAlertSent(false);
 
         addLog(`🚨 Fall pattern detected (${source})`);
 
@@ -275,11 +278,17 @@ export default function FallDetectionPage() {
 
               addLog("⏰ No response — sending emergency SOS");
 
-              void sendCompleteEmergencyAlert();
+              // Keep alert visible while automatic SOS is being sent.
+              setSendingAlert(true);
 
-              setAlertActive(false);
+              void sendCompleteEmergencyAlert().then(() => {
+                setAlertActive(false);
+                setAlertSent(true);
+                setSendingAlert(false);
+                setCountdown(30);
+              });
 
-              return 30;
+              return 0;
             }
 
             return currentCountdown - 1;
@@ -309,14 +318,10 @@ export default function FallDetectionPage() {
 
       setMagnitude(mag);
 
-      // Strong movement / impact
       if (mag > 2.5) {
         setMotionState("Impact spike");
         spikeDetectedAt.current = Date.now();
-      }
-
-      // Sudden stillness after impact
-      else if (
+      } else if (
         mag < 1.3 &&
         spikeDetectedAt.current &&
         Date.now() - spikeDetectedAt.current < 2000
@@ -367,6 +372,7 @@ export default function FallDetectionPage() {
     window.addEventListener("devicemotion", motionHandlerRef.current);
 
     setMonitoring(true);
+    setAlertSent(false);
 
     addLog(
       `🟢 Monitoring started for ${
@@ -382,7 +388,6 @@ export default function FallDetectionPage() {
   function stopMonitoring() {
     if (motionHandlerRef.current) {
       window.removeEventListener("devicemotion", motionHandlerRef.current);
-
       motionHandlerRef.current = null;
     }
 
@@ -395,6 +400,8 @@ export default function FallDetectionPage() {
     setMagnitude(null);
     setMotionState("—");
     setAlertActive(false);
+    setAlertSent(false);
+    setSendingAlert(false);
     setCountdown(30);
 
     addLog("Monitoring stopped");
@@ -411,6 +418,7 @@ export default function FallDetectionPage() {
     }
 
     setAlertActive(false);
+    setAlertSent(false);
     setCountdown(30);
 
     addLog("I'm OK — no alert sent");
@@ -425,16 +433,29 @@ export default function FallDetectionPage() {
       return;
     }
 
+    if (!selectedResidentId) {
+      addLog("Please select a resident first");
+      return;
+    }
+
     if (countdownTimer.current) {
       clearInterval(countdownTimer.current);
       countdownTimer.current = null;
     }
 
+    // Immediately hide the countdown/buttons.
     setAlertActive(false);
+    setSendingAlert(true);
 
-    await sendCompleteEmergencyAlert();
+    const result = await sendCompleteEmergencyAlert();
 
+    setSendingAlert(false);
     setCountdown(30);
+
+    // Show a clean success/failure result instead of the old countdown.
+    if (result.staffAlertSent || result.sosSent) {
+      setAlertSent(true);
+    }
   }
 
   // ---------------------------------------------------------
@@ -460,351 +481,649 @@ export default function FallDetectionPage() {
   return (
     <div
       style={{
-        maxWidth: 420,
-        margin: "0 auto",
-        padding: 20,
-        fontFamily: "sans-serif",
+        minHeight: "100vh",
+        background: "#f5f7fb",
+        padding: "24px 16px 40px",
+        fontFamily:
+          "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        color: "#172033",
       }}
     >
-      <h1 style={{ fontSize: 20, marginBottom: 4 }}>
-        ElderLink Fall Detection
-      </h1>
-
-      <p
-        style={{
-          color: "#666",
-          fontSize: 13,
-          marginBottom: 20,
-        }}
-      >
-        Phone accelerometer acting as an in-room sensor
-      </p>
-
-      {/* ---------------------------------------------------
-          RESIDENT SELECTION
-      --------------------------------------------------- */}
-
       <div
         style={{
-          border: "1px solid #ddd",
-          borderRadius: 12,
-          padding: 18,
-          marginBottom: 16,
+          width: "100%",
+          maxWidth: 520,
+          margin: "0 auto",
         }}
       >
-        <label
-          style={{
-            display: "block",
-            fontSize: 13,
-            fontWeight: 700,
-            marginBottom: 7,
-          }}
-        >
-          Select Resident
-        </label>
+        {/* HEADER */}
 
-        <select
-          value={selectedResidentId}
-          onChange={(e) => {
-            if (monitoring) {
-              addLog("Stop monitoring before changing resident");
-              return;
-            }
-
-            setSelectedResidentId(e.target.value);
-          }}
-          disabled={monitoring || residentsLoading}
+        <div
           style={{
-            width: "100%",
-            padding: 12,
-            borderRadius: 8,
-            border: "1px solid #ccc",
             background: "white",
-            fontSize: 14,
+            borderRadius: 18,
+            padding: "22px 20px",
+            marginBottom: 16,
+            boxShadow: "0 2px 12px rgba(0,0,0,0.06)",
           }}
         >
-          <option value="">
-            {residentsLoading ? "Loading residents..." : "Choose resident"}
-          </option>
-
-          {residents.map((resident) => (
-            <option key={resident.id} value={resident.id}>
-              {resident.full_name}
-              {resident.room_number ? ` — Room ${resident.room_number}` : ""}
-            </option>
-          ))}
-        </select>
-
-        {selectedResident && (
           <div
             style={{
-              marginTop: 10,
-              padding: 10,
-              background: "#f0fdf4",
-              borderRadius: 8,
-              fontSize: 13,
-              color: "#166534",
+              fontSize: 12,
+              fontWeight: 800,
+              color: "#2F5496",
+              textTransform: "uppercase",
+              letterSpacing: "0.08em",
+              marginBottom: 6,
             }}
           >
-            Monitoring device assigned to{" "}
-            <strong>{selectedResident.full_name}</strong>
-            {selectedResident.room_number
-              ? ` — Room ${selectedResident.room_number}`
-              : ""}
+            ElderLink
+          </div>
+
+          <h1
+            style={{
+              fontSize: 25,
+              margin: 0,
+              fontWeight: 800,
+              lineHeight: 1.2,
+            }}
+          >
+            Fall Detection
+          </h1>
+
+          <p
+            style={{
+              color: "#667085",
+              fontSize: 14,
+              lineHeight: 1.5,
+              margin: "8px 0 0",
+            }}
+          >
+            Your phone acts as an in-room fall detection sensor.
+          </p>
+        </div>
+
+        {/* RESIDENT */}
+
+        <div
+          style={{
+            background: "white",
+            borderRadius: 18,
+            padding: 20,
+            marginBottom: 16,
+            boxShadow: "0 2px 12px rgba(0,0,0,0.06)",
+          }}
+        >
+          <div
+            style={{
+              fontSize: 14,
+              fontWeight: 800,
+              marginBottom: 10,
+            }}
+          >
+            Resident
+          </div>
+
+          <select
+            value={selectedResidentId}
+            onChange={(e) => {
+              if (monitoring) {
+                addLog("Stop monitoring before changing resident");
+                return;
+              }
+
+              setSelectedResidentId(e.target.value);
+              setAlertSent(false);
+            }}
+            disabled={monitoring || residentsLoading}
+            style={{
+              width: "100%",
+              boxSizing: "border-box",
+              padding: "14px 12px",
+              borderRadius: 12,
+              border: "1px solid #d0d5dd",
+              background: "white",
+              fontSize: 15,
+              outline: "none",
+            }}
+          >
+            <option value="">
+              {residentsLoading ? "Loading residents..." : "Choose resident"}
+            </option>
+
+            {residents.map((resident) => (
+              <option key={resident.id} value={resident.id}>
+                {resident.full_name}
+                {resident.room_number ? ` — Room ${resident.room_number}` : ""}
+              </option>
+            ))}
+          </select>
+
+          {selectedResident && (
+            <div
+              style={{
+                marginTop: 12,
+                padding: 14,
+                background: "#eff6ff",
+                borderRadius: 12,
+                border: "1px solid #bfdbfe",
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 12,
+                  color: "#475467",
+                  marginBottom: 3,
+                }}
+              >
+                Monitoring resident
+              </div>
+
+              <div
+                style={{
+                  fontSize: 16,
+                  fontWeight: 800,
+                  color: "#1e3a8a",
+                }}
+              >
+                {selectedResident.full_name}
+              </div>
+
+              {selectedResident.room_number && (
+                <div
+                  style={{
+                    fontSize: 13,
+                    color: "#475467",
+                    marginTop: 3,
+                  }}
+                >
+                  Room {selectedResident.room_number}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* MONITORING */}
+
+        <div
+          style={{
+            background: "white",
+            borderRadius: 18,
+            padding: 20,
+            marginBottom: 16,
+            boxShadow: "0 2px 12px rgba(0,0,0,0.06)",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: 18,
+            }}
+          >
+            <div
+              style={{
+                fontSize: 15,
+                fontWeight: 800,
+              }}
+            >
+              Monitoring
+            </div>
+
+            <div
+              style={{
+                padding: "6px 10px",
+                borderRadius: 999,
+                background: monitoring ? "#dcfce7" : "#f2f4f7",
+                color: monitoring ? "#166534" : "#667085",
+                fontSize: 12,
+                fontWeight: 800,
+              }}
+            >
+              {monitoring ? "● ACTIVE" : "● OFF"}
+            </div>
+          </div>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: 10,
+              marginBottom: 14,
+            }}
+          >
+            <div
+              style={{
+                background: "#f8fafc",
+                borderRadius: 12,
+                padding: 14,
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 11,
+                  color: "#667085",
+                  marginBottom: 5,
+                }}
+              >
+                Acceleration
+              </div>
+
+              <div
+                style={{
+                  fontSize: 18,
+                  fontWeight: 800,
+                }}
+              >
+                {magnitude !== null ? `${magnitude.toFixed(2)} g` : "—"}
+              </div>
+            </div>
+
+            <div
+              style={{
+                background: "#f8fafc",
+                borderRadius: 12,
+                padding: 14,
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 11,
+                  color: "#667085",
+                  marginBottom: 5,
+                }}
+              >
+                Motion
+              </div>
+
+              <div
+                style={{
+                  fontSize: 14,
+                  fontWeight: 800,
+                }}
+              >
+                {motionState}
+              </div>
+            </div>
+          </div>
+
+          <button
+            onClick={monitoring ? stopMonitoring : startMonitoring}
+            disabled={!selectedResidentId && !monitoring}
+            style={{
+              width: "100%",
+              padding: 14,
+              borderRadius: 12,
+              border: "none",
+              background: monitoring ? "#344054" : "#2F5496",
+              color: "white",
+              fontWeight: 800,
+              fontSize: 15,
+              cursor: "pointer",
+              opacity: !selectedResidentId && !monitoring ? 0.5 : 1,
+            }}
+          >
+            {monitoring ? "Stop Monitoring" : "Start Monitoring"}
+          </button>
+
+          <button
+            onClick={() => triggerFallSequence("test simulation")}
+            disabled={!monitoring || !selectedResidentId || sendingAlert}
+            style={{
+              width: "100%",
+              padding: 14,
+              marginTop: 10,
+              borderRadius: 12,
+              border: "2px solid #dc2626",
+              background: "white",
+              color: "#dc2626",
+              fontWeight: 800,
+              fontSize: 15,
+              cursor: "pointer",
+              opacity:
+                monitoring && selectedResidentId && !sendingAlert ? 1 : 0.45,
+            }}
+          >
+            🚨 Simulate Fall
+          </button>
+        </div>
+
+        {/* FALL ALERT */}
+
+        {alertActive && (
+          <div
+            style={{
+              background: "#fff1f2",
+              border: "2px solid #ef4444",
+              borderRadius: 20,
+              padding: 22,
+              marginBottom: 16,
+              textAlign: "center",
+              boxShadow: "0 4px 18px rgba(220,38,38,0.12)",
+            }}
+          >
+            <div
+              style={{
+                fontSize: 34,
+                marginBottom: 5,
+              }}
+            >
+              🚨
+            </div>
+
+            <h2
+              style={{
+                color: "#b91c1c",
+                margin: 0,
+                fontSize: 21,
+                fontWeight: 900,
+              }}
+            >
+              FALL DETECTED
+            </h2>
+
+            <div
+              style={{
+                marginTop: 12,
+                fontSize: 15,
+                fontWeight: 800,
+              }}
+            >
+              {selectedResident?.full_name || "Unknown resident"}
+            </div>
+
+            {selectedResident?.room_number && (
+              <div
+                style={{
+                  color: "#667085",
+                  fontSize: 13,
+                  marginTop: 3,
+                }}
+              >
+                Room {selectedResident.room_number}
+              </div>
+            )}
+
+            <div
+              style={{
+                marginTop: 18,
+                color: "#475467",
+                fontSize: 14,
+                fontWeight: 600,
+              }}
+            >
+              Are you okay?
+            </div>
+
+            {/* BIG COUNTDOWN */}
+
+            <div
+              style={{
+                width: 130,
+                height: 130,
+                margin: "16px auto",
+                borderRadius: "50%",
+                background: "white",
+                border: "7px solid #ef4444",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexDirection: "column",
+                boxSizing: "border-box",
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 48,
+                  lineHeight: 1,
+                  fontWeight: 900,
+                  color: "#b91c1c",
+                }}
+              >
+                {countdown}
+              </div>
+
+              <div
+                style={{
+                  fontSize: 11,
+                  color: "#667085",
+                  fontWeight: 700,
+                  marginTop: 5,
+                }}
+              >
+                SECONDS
+              </div>
+            </div>
+
+            <button
+              onClick={handleImOk}
+              disabled={sendingAlert}
+              style={{
+                width: "100%",
+                padding: 15,
+                borderRadius: 12,
+                border: "none",
+                background: "#16a34a",
+                color: "white",
+                fontWeight: 900,
+                fontSize: 15,
+                cursor: "pointer",
+                opacity: sendingAlert ? 0.5 : 1,
+              }}
+            >
+              ✓ I&apos;M OK
+            </button>
+
+            <button
+              onClick={handleSendAlert}
+              disabled={sendingAlert}
+              style={{
+                width: "100%",
+                padding: 15,
+                marginTop: 10,
+                borderRadius: 12,
+                border: "none",
+                background: "#dc2626",
+                color: "white",
+                fontWeight: 900,
+                fontSize: 15,
+                cursor: "pointer",
+                opacity: sendingAlert ? 0.65 : 1,
+              }}
+            >
+              {sendingAlert
+                ? "Sending Emergency Alert..."
+                : "🚨 SEND ALERT NOW"}
+            </button>
           </div>
         )}
-      </div>
 
-      {/* ---------------------------------------------------
-          MONITORING
-      --------------------------------------------------- */}
+        {/* SENDING STATUS */}
 
-      <div
-        style={{
-          border: "1px solid #ddd",
-          borderRadius: 12,
-          padding: 18,
-          marginBottom: 16,
-        }}
-      >
-        <div
-          style={{
-            marginBottom: 12,
-            fontWeight: 600,
-          }}
-        >
-          {monitoring ? "🟢 Monitoring" : "⚪ Not monitoring"}
-        </div>
-
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            padding: "6px 0",
-            borderBottom: "1px solid #eee",
-            fontSize: 14,
-          }}
-        >
-          <span style={{ color: "#666" }}>Acceleration magnitude</span>
-
-          <span style={{ fontWeight: 600 }}>
-            {magnitude !== null ? `${magnitude.toFixed(2)} g` : "—"}
-          </span>
-        </div>
-
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            padding: "6px 0",
-            fontSize: 14,
-          }}
-        >
-          <span style={{ color: "#666" }}>Motion state</span>
-
-          <span style={{ fontWeight: 600 }}>{motionState}</span>
-        </div>
-
-        <button
-          onClick={monitoring ? stopMonitoring : startMonitoring}
-          disabled={!selectedResidentId && !monitoring}
-          style={{
-            width: "100%",
-            padding: 12,
-            marginTop: 14,
-            borderRadius: 8,
-            border: "none",
-            background: "#2F5496",
-            color: "white",
-            fontWeight: 600,
-            opacity: !selectedResidentId && !monitoring ? 0.5 : 1,
-          }}
-        >
-          {monitoring ? "Stop Monitoring" : "Start Monitoring"}
-        </button>
-
-        <button
-          onClick={() => triggerFallSequence("test simulation")}
-          disabled={!monitoring || !selectedResidentId || sendingAlert}
-          style={{
-            width: "100%",
-            padding: 12,
-            marginTop: 8,
-            borderRadius: 8,
-            border: "1px solid #dc2626",
-            background: "white",
-            color: "#dc2626",
-            fontWeight: 700,
-            opacity:
-              monitoring && selectedResidentId && !sendingAlert ? 1 : 0.5,
-          }}
-        >
-          🚨 Simulate Fall
-        </button>
-      </div>
-
-      {/* ---------------------------------------------------
-          FALL ALERT
-      --------------------------------------------------- */}
-
-      {alertActive && (
-        <div
-          style={{
-            border: "1px solid #dc2626",
-            background: "#fee2e2",
-            borderRadius: 12,
-            padding: 18,
-            marginBottom: 16,
-            textAlign: "center",
-          }}
-        >
-          <h2
+        {sendingAlert && !alertActive && (
+          <div
             style={{
-              color: "#dc2626",
-              margin: "0 0 6px",
-              fontSize: 16,
+              background: "#fff7ed",
+              border: "2px solid #fb923c",
+              borderRadius: 18,
+              padding: 22,
+              marginBottom: 16,
+              textAlign: "center",
             }}
           >
-            🚨 Potential Fall Detected
-          </h2>
-
-          <p
-            style={{
-              margin: 0,
-              fontSize: 13,
-            }}
-          >
-            Resident:
-          </p>
-
-          <strong
-            style={{
-              display: "block",
-              fontSize: 16,
-              marginTop: 4,
-            }}
-          >
-            {selectedResident?.full_name || "Unknown resident"}
-          </strong>
-
-          {selectedResident?.room_number && (
             <div
               style={{
-                fontSize: 13,
-                color: "#666",
-                marginTop: 3,
+                fontSize: 30,
+                marginBottom: 8,
               }}
             >
-              Room {selectedResident.room_number}
+              📢
             </div>
-          )}
 
-          <p
+            <div
+              style={{
+                fontSize: 18,
+                fontWeight: 900,
+                color: "#c2410c",
+              }}
+            >
+              Sending Emergency Alert
+            </div>
+
+            <div
+              style={{
+                marginTop: 7,
+                fontSize: 13,
+                color: "#667085",
+              }}
+            >
+              Notifying staff and family...
+            </div>
+          </div>
+        )}
+
+        {/* ALERT SENT */}
+
+        {alertSent && !alertActive && !sendingAlert && (
+          <div
             style={{
-              margin: "12px 0 0",
-              fontSize: 13,
+              background: "#ecfdf3",
+              border: "2px solid #22c55e",
+              borderRadius: 18,
+              padding: 22,
+              marginBottom: 16,
+              textAlign: "center",
             }}
           >
-            Are you okay?
-          </p>
+            <div
+              style={{
+                fontSize: 38,
+                marginBottom: 8,
+              }}
+            >
+              ✅
+            </div>
+
+            <div
+              style={{
+                fontSize: 20,
+                fontWeight: 900,
+                color: "#166534",
+              }}
+            >
+              Emergency Alert Sent
+            </div>
+
+            <div
+              style={{
+                marginTop: 8,
+                fontSize: 14,
+                color: "#475467",
+              }}
+            >
+              {selectedResident?.full_name || "Resident"} has been reported to
+              the care team.
+            </div>
+
+            <div
+              style={{
+                marginTop: 14,
+                padding: 12,
+                background: "white",
+                borderRadius: 12,
+                fontSize: 13,
+                color: "#166534",
+                fontWeight: 700,
+              }}
+            >
+              ✓ Staff notified
+              <br />
+              ✓ Family emergency process started
+              <br />✓ SMS / WhatsApp / Voice attempted
+            </div>
+
+            <button
+              onClick={() => setAlertSent(false)}
+              style={{
+                width: "100%",
+                padding: 12,
+                marginTop: 14,
+                borderRadius: 10,
+                border: "1px solid #bbf7d0",
+                background: "white",
+                color: "#166534",
+                fontWeight: 800,
+                cursor: "pointer",
+              }}
+            >
+              Continue Monitoring
+            </button>
+          </div>
+        )}
+
+        {/* ACTIVITY LOG */}
+
+        <div
+          style={{
+            background: "white",
+            borderRadius: 18,
+            padding: 18,
+            boxShadow: "0 2px 12px rgba(0,0,0,0.06)",
+          }}
+        >
+          <div
+            style={{
+              fontWeight: 800,
+              fontSize: 14,
+              marginBottom: 10,
+            }}
+          >
+            Activity Log
+          </div>
 
           <div
             style={{
-              fontSize: 32,
-              fontWeight: 700,
-              margin: "8px 0",
+              maxHeight: 220,
+              overflowY: "auto",
             }}
           >
-            {countdown}
+            {log.length === 0 && (
+              <div
+                style={{
+                  fontSize: 12,
+                  color: "#98a2b3",
+                  padding: "8px 0",
+                }}
+              >
+                Waiting to start...
+              </div>
+            )}
+
+            {log.map((entry, i) => (
+              <div
+                key={i}
+                style={{
+                  fontSize: 12,
+                  color: "#667085",
+                  padding: "7px 0",
+                  borderBottom: "1px solid #f2f4f7",
+                  lineHeight: 1.4,
+                }}
+              >
+                <span
+                  style={{
+                    color: "#98a2b3",
+                    marginRight: 5,
+                  }}
+                >
+                  {entry.time}
+                </span>
+                {entry.msg}
+              </div>
+            ))}
           </div>
-
-          <button
-            onClick={handleImOk}
-            disabled={sendingAlert}
-            style={{
-              width: "100%",
-              padding: 12,
-              marginTop: 6,
-              borderRadius: 8,
-              border: "none",
-              background: "#16a34a",
-              color: "white",
-              fontWeight: 600,
-            }}
-          >
-            I&apos;m OK
-          </button>
-
-          <button
-            onClick={handleSendAlert}
-            disabled={sendingAlert}
-            style={{
-              width: "100%",
-              padding: 12,
-              marginTop: 8,
-              borderRadius: 8,
-              border: "none",
-              background: "#dc2626",
-              color: "white",
-              fontWeight: 600,
-            }}
-          >
-            {sendingAlert ? "Sending Emergency Alert..." : "🚨 Send Alert Now"}
-          </button>
-        </div>
-      )}
-
-      {/* ---------------------------------------------------
-          ACTIVITY LOG
-      --------------------------------------------------- */}
-
-      <div
-        style={{
-          border: "1px solid #ddd",
-          borderRadius: 12,
-          padding: 14,
-        }}
-      >
-        <div
-          style={{
-            fontWeight: 600,
-            fontSize: 13,
-            marginBottom: 8,
-          }}
-        >
-          Activity Log
-        </div>
-
-        <div
-          style={{
-            maxHeight: 220,
-            overflowY: "auto",
-          }}
-        >
-          {log.length === 0 && (
-            <div
-              style={{
-                fontSize: 12,
-                color: "#888",
-              }}
-            >
-              Waiting to start...
-            </div>
-          )}
-
-          {log.map((entry, i) => (
-            <div
-              key={i}
-              style={{
-                fontSize: 12,
-                color: "#666",
-                padding: "4px 0",
-                borderBottom: "1px dashed #eee",
-              }}
-            >
-              {entry.time} — {entry.msg}
-            </div>
-          ))}
         </div>
       </div>
     </div>
