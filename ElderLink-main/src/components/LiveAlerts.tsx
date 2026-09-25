@@ -202,121 +202,190 @@ export default function LiveAlerts() {
   }
 
   return (
-    <div className="rounded-2xl border border-red-200 bg-white p-5 shadow-sm">
-      <div className="mb-5 flex items-start justify-between gap-4">
-        <div>
-          <h2 className="text-xl font-bold text-red-700">
-            🚨 Emergency Dashboard
-          </h2>
+    <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      {/* Dashboard Header */}
+      <div className="border-b border-slate-200 bg-slate-50 px-6 py-5">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h2 className="text-xl font-bold tracking-tight text-slate-900">
+              Emergency Monitoring
+            </h2>
 
-          <p className="mt-1 text-sm text-gray-500">
-            Live fall detection alerts
-          </p>
-        </div>
+            <p className="mt-1 text-sm text-slate-500">
+              Real-time fall detection and response monitoring
+            </p>
+          </div>
 
-        <div className="flex shrink-0 items-center gap-2">
-          <span
-            className={`h-3 w-3 rounded-full ${
-              alerts.length > 0 ? "bg-red-500" : "bg-green-500"
+          <div
+            className={`flex items-center gap-2 rounded-full border px-3 py-2 text-sm font-semibold ${
+              alerts.length > 0
+                ? "border-red-200 bg-red-50 text-red-700"
+                : "border-emerald-200 bg-emerald-50 text-emerald-700"
             }`}
-          />
+          >
+            <span
+              className={`h-2.5 w-2.5 rounded-full ${
+                alerts.length > 0 ? "bg-red-500" : "bg-emerald-500"
+              }`}
+            />
 
-          <span className="text-sm font-bold">
-            {alerts.length > 0 ? `${alerts.length} Active` : "All Clear"}
-          </span>
+            {alerts.length > 0
+              ? `${alerts.length} Active Alert${alerts.length === 1 ? "" : "s"}`
+              : "System Clear"}
+          </div>
         </div>
       </div>
 
+      {/* Loading */}
       {loading ? (
-        <div className="rounded-xl bg-gray-50 py-10 text-center text-sm text-gray-500">
-          Loading alerts...
-        </div>
-      ) : alerts.length === 0 ? (
-        <div className="rounded-xl border border-green-200 bg-green-50 p-8 text-center">
-          <div className="text-4xl">✅</div>
+        <div className="px-6 py-12 text-center">
+          <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-slate-200 border-t-slate-700" />
 
-          <p className="mt-3 font-bold text-green-700">All Clear</p>
-
-          <p className="mt-1 text-sm text-green-600">
-            Monitoring rooms for fall alerts...
+          <p className="mt-4 text-sm text-slate-500">
+            Loading emergency alerts...
           </p>
         </div>
+      ) : alerts.length === 0 ? (
+        /* No Alerts */
+        <div className="px-6 py-12">
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-8 text-center">
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full border-2 border-emerald-500 text-emerald-600">
+              <svg
+                width="24"
+                height="24"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M20 6 9 17l-5-5" />
+              </svg>
+            </div>
+
+            <h3 className="mt-4 text-lg font-bold text-emerald-800">
+              No Active Emergencies
+            </h3>
+
+            <p className="mx-auto mt-1 max-w-md text-sm text-emerald-700">
+              The monitoring system is active and currently has no unresolved
+              fall detection alerts.
+            </p>
+          </div>
+        </div>
       ) : (
-        <div className="space-y-4">
+        /* Active Alerts */
+        <div className="space-y-5 p-6">
           {alerts.map((alert) => (
             <div
               key={alert.id}
-              className="overflow-hidden rounded-2xl border-2 border-red-300 bg-red-50"
+              className="overflow-hidden rounded-2xl border border-red-200 bg-white shadow-sm"
             >
-              <div className="border-b border-red-200 bg-red-100 px-5 py-4">
-                <div className="flex items-start justify-between gap-3">
+              {/* Alert Header */}
+              <div className="border-b border-red-200 bg-red-50 px-5 py-4">
+                <div className="flex items-center justify-between gap-4">
                   <div>
-                    <h3 className="text-lg font-bold text-red-700">
-                      🚨 Fall Detected
-                    </h3>
+                    <div className="flex items-center gap-3">
+                      <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-red-600 text-sm font-bold text-white">
+                        !
+                      </span>
 
-                    <p className="mt-1 text-sm font-semibold text-red-600">
-                      Action Required
-                    </p>
+                      <div>
+                        <h3 className="text-lg font-bold text-red-800">
+                          Fall Detected
+                        </h3>
+
+                        <p className="text-sm text-red-600">
+                          Immediate attention required
+                        </p>
+                      </div>
+                    </div>
                   </div>
 
-                  <span className="rounded-full bg-red-200 px-3 py-1 text-xs font-bold uppercase text-red-800">
-                    {alert.status}
+                  <span className="rounded-full border border-red-300 bg-white px-3 py-1 text-xs font-bold uppercase tracking-wide text-red-700">
+                    Unresolved
                   </span>
                 </div>
               </div>
 
+              {/* Alert Information */}
               <div className="p-5">
-                <div className="rounded-xl border border-red-100 bg-white p-4 shadow-sm">
-                  <p className="text-xs font-bold uppercase tracking-wider text-gray-400">
-                    Resident
-                  </p>
-
-                  <p className="mt-1 text-2xl font-bold text-gray-900">
-                    {alert.resident_name || "Unknown resident"}
-                  </p>
-
-                  {alert.room_number && (
-                    <p className="mt-1 text-sm font-medium text-gray-500">
-                      🛏️ Room {alert.room_number}
-                    </p>
-                  )}
-                </div>
-
-                <div className="mt-4 grid grid-cols-2 gap-3">
-                  <div className="rounded-xl bg-white p-4">
-                    <p className="text-xs font-bold uppercase tracking-wider text-gray-400">
-                      Device
+                <div className="grid gap-4 md:grid-cols-3">
+                  {/* Resident */}
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                      Resident
                     </p>
 
-                    <p className="mt-1 font-bold text-gray-900">
-                      📱 {formatDevice(alert.device_id)}
+                    <p className="mt-2 text-lg font-bold text-slate-900">
+                      {alert.resident_name || "Unknown resident"}
+                    </p>
+
+                    {alert.room_number && (
+                      <p className="mt-1 text-sm text-slate-500">
+                        Room {alert.room_number}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Device */}
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                      Detection Source
+                    </p>
+
+                    <p className="mt-2 text-lg font-bold text-slate-900">
+                      {formatDevice(alert.device_id)}
+                    </p>
+
+                    <p className="mt-1 text-sm text-slate-500">
+                      Fall detection device
                     </p>
                   </div>
 
-                  <div className="rounded-xl bg-white p-4">
-                    <p className="text-xs font-bold uppercase tracking-wider text-gray-400">
-                      Time
+                  {/* Time */}
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                      Detected
                     </p>
 
-                    <p className="mt-1 font-bold text-gray-900">
+                    <p className="mt-2 text-lg font-bold text-slate-900">
                       {new Date(alert.triggered_at).toLocaleTimeString([], {
                         hour: "2-digit",
                         minute: "2-digit",
                       })}
                     </p>
 
-                    <p className="mt-1 text-xs text-gray-500">
+                    <p className="mt-1 text-sm text-slate-500">
                       {new Date(alert.triggered_at).toLocaleDateString()}
                     </p>
                   </div>
                 </div>
 
+                {/* Alert ID */}
+                <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-4">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                      Alert Reference
+                    </p>
+
+                    <p className="mt-1 font-mono text-xs text-slate-500">
+                      {alert.id}
+                    </p>
+                  </div>
+
+                  <span className="text-xs font-medium text-red-600">
+                    Awaiting staff acknowledgement
+                  </span>
+                </div>
+
+                {/* Acknowledge */}
                 <button
                   onClick={() => acknowledgeAlert(alert.id)}
-                  className="mt-5 w-full rounded-xl bg-green-600 px-4 py-4 font-bold text-white transition hover:bg-green-700"
+                  className="mt-5 w-full rounded-xl bg-slate-900 px-4 py-3.5 text-sm font-bold text-white transition hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:ring-offset-2"
                 >
-                  ✓ Acknowledge Alert
+                  Acknowledge and Resolve Alert
                 </button>
               </div>
             </div>

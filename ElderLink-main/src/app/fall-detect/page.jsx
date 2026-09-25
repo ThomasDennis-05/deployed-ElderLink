@@ -27,7 +27,41 @@ export default function FallDetectionPage() {
 
   const spikeDetectedAt = useRef(null);
   const countdownTimer = useRef(null);
+  const vibrationTimer = useRef(null);
   const motionHandlerRef = useRef(null);
+
+  // ---------------------------------------------------------
+  // VIBRATION
+  // ---------------------------------------------------------
+
+  function stopVibration() {
+    if (vibrationTimer.current) {
+      clearInterval(vibrationTimer.current);
+      vibrationTimer.current = null;
+    }
+
+    if (typeof navigator !== "undefined" && "vibrate" in navigator) {
+      navigator.vibrate(0);
+    }
+  }
+
+  function startVibration() {
+    stopVibration();
+
+    if (typeof navigator === "undefined" || !("vibrate" in navigator)) {
+      return;
+    }
+
+    // Start immediately.
+    navigator.vibrate([500, 300, 500, 300]);
+
+    // Continue vibrating while the countdown is active.
+    vibrationTimer.current = setInterval(() => {
+      if ("vibrate" in navigator) {
+        navigator.vibrate([500, 300, 500, 300]);
+      }
+    }, 1600);
+  }
 
   // ---------------------------------------------------------
   // LOAD RESIDENTS
@@ -93,10 +127,7 @@ export default function FallDetectionPage() {
     try {
       const { error } = await supabase.from("fall_events").insert({
         resident_id: selectedResidentId,
-
-        // Store a simple device name instead of PHONE-SIM-01
         device_id: "PHONE",
-
         z_drop: 1.8,
         doppler_spike: 0,
         status: "unresolved",
@@ -109,7 +140,7 @@ export default function FallDetectionPage() {
       }
 
       addLog(
-        `🚨 Staff alert sent for ${selectedResident?.full_name || "resident"}`,
+        `Staff alert sent for ${selectedResident?.full_name || "resident"}`,
       );
 
       return true;
@@ -136,9 +167,7 @@ export default function FallDetectionPage() {
 
     try {
       addLog(
-        `📢 Sending SOS to ${
-          selectedResident?.full_name || "family contact"
-        }...`,
+        `Sending SOS to ${selectedResident?.full_name || "family contact"}...`,
       );
 
       const response = await fetch("/api/emergency-alert", {
@@ -163,36 +192,36 @@ export default function FallDetectionPage() {
       const failedChannels = result.failedChannels || [];
 
       if (sentChannels.includes("sms")) {
-        addLog("✅ SMS SOS sent");
+        addLog("SMS SOS sent");
       }
 
       if (sentChannels.includes("whatsapp")) {
-        addLog("✅ WhatsApp SOS sent");
+        addLog("WhatsApp SOS sent");
       }
 
       if (sentChannels.includes("voice")) {
-        addLog("✅ SOS phone call started");
+        addLog("SOS phone call started");
       }
 
       if (failedChannels.includes("sms")) {
-        addLog("⚠️ SMS SOS failed");
+        addLog("SMS SOS failed");
       }
 
       if (failedChannels.includes("whatsapp")) {
-        addLog("⚠️ WhatsApp SOS failed");
+        addLog("WhatsApp SOS failed");
       }
 
       if (failedChannels.includes("voice")) {
-        addLog("⚠️ SOS phone call failed");
+        addLog("SOS phone call failed");
       }
 
       if (sentChannels.length === 0) {
-        addLog("❌ No SOS channels were successfully sent");
+        addLog("No SOS channels were successfully sent");
         return false;
       }
 
       addLog(
-        `🚨 SOS completed: ${sentChannels
+        `SOS completed: ${sentChannels
           .map((channel) => {
             if (channel === "sms") return "SMS";
             if (channel === "whatsapp") return "WhatsApp";
@@ -208,7 +237,7 @@ export default function FallDetectionPage() {
 
       console.error("Automatic SOS error:", err);
 
-      addLog(`❌ Automatic SOS failed: ${message}`);
+      addLog(`Automatic SOS failed: ${message}`);
 
       return false;
     } finally {
@@ -223,6 +252,7 @@ export default function FallDetectionPage() {
   async function sendCompleteEmergencyAlert() {
     if (!selectedResidentId) {
       addLog("Please select a resident first");
+
       return {
         staffAlertSent: false,
         sosSent: false,
@@ -234,11 +264,11 @@ export default function FallDetectionPage() {
     const sosSent = await sendAutomaticSOS();
 
     if (staffAlertSent && sosSent) {
-      addLog("🚨 Complete emergency alert sent");
+      addLog("Complete emergency alert sent");
     } else if (staffAlertSent) {
-      addLog("⚠️ Staff alerted, but SOS delivery had a problem");
+      addLog("Staff alerted, but SOS delivery had a problem");
     } else if (sosSent) {
-      addLog("⚠️ SOS sent, but staff dashboard alert had a problem");
+      addLog("SOS sent, but staff dashboard alert had a problem");
     }
 
     return {
@@ -260,9 +290,12 @@ export default function FallDetectionPage() {
 
         setAlertSent(false);
 
-        addLog(`🚨 Fall pattern detected (${source})`);
+        addLog(`Fall pattern detected (${source})`);
 
         setCountdown(30);
+
+        // Start phone vibration immediately.
+        startVibration();
 
         if (countdownTimer.current) {
           clearInterval(countdownTimer.current);
@@ -276,9 +309,11 @@ export default function FallDetectionPage() {
                 countdownTimer.current = null;
               }
 
-              addLog("⏰ No response — sending emergency SOS");
+              // Stop vibration when countdown finishes.
+              stopVibration();
 
-              // Keep alert visible while automatic SOS is being sent.
+              addLog("No response — sending emergency SOS");
+
               setSendingAlert(true);
 
               void sendCompleteEmergencyAlert().then(() => {
@@ -375,7 +410,7 @@ export default function FallDetectionPage() {
     setAlertSent(false);
 
     addLog(
-      `🟢 Monitoring started for ${
+      `Monitoring started for ${
         selectedResident?.full_name || "selected resident"
       }`,
     );
@@ -388,6 +423,7 @@ export default function FallDetectionPage() {
   function stopMonitoring() {
     if (motionHandlerRef.current) {
       window.removeEventListener("devicemotion", motionHandlerRef.current);
+
       motionHandlerRef.current = null;
     }
 
@@ -395,6 +431,8 @@ export default function FallDetectionPage() {
       clearInterval(countdownTimer.current);
       countdownTimer.current = null;
     }
+
+    stopVibration();
 
     setMonitoring(false);
     setMagnitude(null);
@@ -416,6 +454,8 @@ export default function FallDetectionPage() {
       clearInterval(countdownTimer.current);
       countdownTimer.current = null;
     }
+
+    stopVibration();
 
     setAlertActive(false);
     setAlertSent(false);
@@ -443,7 +483,8 @@ export default function FallDetectionPage() {
       countdownTimer.current = null;
     }
 
-    // Immediately hide the countdown/buttons.
+    stopVibration();
+
     setAlertActive(false);
     setSendingAlert(true);
 
@@ -452,7 +493,6 @@ export default function FallDetectionPage() {
     setSendingAlert(false);
     setCountdown(30);
 
-    // Show a clean success/failure result instead of the old countdown.
     if (result.staffAlertSent || result.sosSent) {
       setAlertSent(true);
     }
@@ -471,6 +511,8 @@ export default function FallDetectionPage() {
       if (countdownTimer.current) {
         clearInterval(countdownTimer.current);
       }
+
+      stopVibration();
     };
   }, []);
 
@@ -786,7 +828,7 @@ export default function FallDetectionPage() {
                 monitoring && selectedResidentId && !sendingAlert ? 1 : 0.45,
             }}
           >
-            🚨 Simulate Fall
+            Simulate Fall
           </button>
         </div>
 
@@ -806,11 +848,20 @@ export default function FallDetectionPage() {
           >
             <div
               style={{
-                fontSize: 34,
-                marginBottom: 5,
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 46,
+                height: 46,
+                borderRadius: "50%",
+                background: "#dc2626",
+                color: "white",
+                fontSize: 24,
+                fontWeight: 900,
+                marginBottom: 8,
               }}
             >
-              🚨
+              !
             </div>
 
             <h2
@@ -854,10 +905,10 @@ export default function FallDetectionPage() {
                 fontWeight: 600,
               }}
             >
-              Are you okay?
+              Please confirm that you are safe.
             </div>
 
-            {/* BIG COUNTDOWN */}
+            {/* COUNTDOWN */}
 
             <div
               style={{
@@ -913,7 +964,7 @@ export default function FallDetectionPage() {
                 opacity: sendingAlert ? 0.5 : 1,
               }}
             >
-              ✓ I&apos;M OK
+              I&apos;M OK
             </button>
 
             <button
@@ -933,10 +984,18 @@ export default function FallDetectionPage() {
                 opacity: sendingAlert ? 0.65 : 1,
               }}
             >
-              {sendingAlert
-                ? "Sending Emergency Alert..."
-                : "🚨 SEND ALERT NOW"}
+              {sendingAlert ? "Sending Emergency Alert..." : "SEND ALERT NOW"}
             </button>
+
+            <div
+              style={{
+                marginTop: 12,
+                fontSize: 11,
+                color: "#667085",
+              }}
+            >
+              The phone will vibrate while this countdown is active.
+            </div>
           </div>
         )}
 
@@ -955,11 +1014,19 @@ export default function FallDetectionPage() {
           >
             <div
               style={{
-                fontSize: 30,
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 42,
+                height: 42,
+                borderRadius: "50%",
+                background: "#f97316",
+                color: "white",
+                fontWeight: 900,
                 marginBottom: 8,
               }}
             >
-              📢
+              ...
             </div>
 
             <div
@@ -999,11 +1066,20 @@ export default function FallDetectionPage() {
           >
             <div
               style={{
-                fontSize: 38,
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 46,
+                height: 46,
+                borderRadius: "50%",
+                background: "#16a34a",
+                color: "white",
+                fontSize: 24,
+                fontWeight: 900,
                 marginBottom: 8,
               }}
             >
-              ✅
+              ✓
             </div>
 
             <div
@@ -1036,12 +1112,14 @@ export default function FallDetectionPage() {
                 fontSize: 13,
                 color: "#166534",
                 fontWeight: 700,
+                lineHeight: 1.8,
               }}
             >
-              ✓ Staff notified
+              Staff notified
               <br />
-              ✓ Family emergency process started
-              <br />✓ SMS / WhatsApp / Voice attempted
+              Family emergency process started
+              <br />
+              SMS / WhatsApp / Voice attempted
             </div>
 
             <button
@@ -1120,6 +1198,7 @@ export default function FallDetectionPage() {
                 >
                   {entry.time}
                 </span>
+
                 {entry.msg}
               </div>
             ))}
