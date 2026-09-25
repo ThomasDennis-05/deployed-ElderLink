@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 const supabase = createClient(
@@ -9,16 +9,57 @@ const supabase = createClient(
 );
 
 export default function FallDetectionPage() {
+  const [residents, setResidents] = useState([]);
+  const [selectedResidentId, setSelectedResidentId] = useState("");
+  const [residentsLoading, setResidentsLoading] = useState(true);
+
   const [monitoring, setMonitoring] = useState(false);
   const [magnitude, setMagnitude] = useState(null);
   const [motionState, setMotionState] = useState("—");
+
   const [alertActive, setAlertActive] = useState(false);
   const [countdown, setCountdown] = useState(30);
+
   const [log, setLog] = useState([]);
 
   const spikeDetectedAt = useRef(null);
   const countdownTimer = useRef(null);
   const motionHandlerRef = useRef(null);
+
+  // ---------------------------------------------------------
+  // LOAD RESIDENTS
+  // ---------------------------------------------------------
+
+  useEffect(() => {
+    async function loadResidents() {
+      setResidentsLoading(true);
+
+      const { data, error } = await supabase
+        .from("residents")
+        .select("id, full_name, room_number, status")
+        .eq("status", "active")
+        .order("full_name");
+
+      if (error) {
+        console.error("Failed to load residents:", error);
+        addLog(`Failed to load residents: ${error.message}`);
+      } else {
+        setResidents(data || []);
+
+        if (data && data.length > 0) {
+          setSelectedResidentId(data[0].id);
+        }
+      }
+
+      setResidentsLoading(false);
+    }
+
+    loadResidents();
+  }, []);
+
+  // ---------------------------------------------------------
+  // HELPER
+  // ---------------------------------------------------------
 
   function addLog(msg) {
     setLog((prev) =>
@@ -32,9 +73,23 @@ export default function FallDetectionPage() {
     );
   }
 
+  const selectedResident = residents.find(
+    (resident) => resident.id === selectedResidentId,
+  );
+
+  // ---------------------------------------------------------
+  // SEND FALL EVENT
+  // ---------------------------------------------------------
+
   async function sendFallEvent() {
+    if (!selectedResidentId) {
+      addLog("Please select a resident first");
+      return false;
+    }
+
     try {
       const { error } = await supabase.from("fall_events").insert({
+        resident_id: selectedResidentId,
         device_id: "PHONE-SIM-01",
         z_drop: 1.8,
         doppler_spike: 0,
@@ -43,56 +98,72 @@ export default function FallDetectionPage() {
 
       if (error) {
         addLog(`Failed to send event: ${error.message}`);
+        console.error("Fall event error:", error);
         return false;
       }
 
-      addLog("🚨 Fall alert sent to staff dashboard");
+      addLog(
+        `🚨 Fall alert sent for ${selectedResident?.full_name || "resident"}`,
+      );
+
       return true;
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
 
       addLog(`Failed to send event: ${message}`);
+
       return false;
     }
   }
 
-  const triggerFallSequence = useCallback((source) => {
-    setAlertActive((current) => {
-      if (current) {
-        return current;
-      }
+  // ---------------------------------------------------------
+  // FALL DETECTION
+  // ---------------------------------------------------------
 
-      addLog(`🚨 Fall pattern detected (${source})`);
-      setCountdown(30);
+  const triggerFallSequence = useCallback(
+    (source) => {
+      setAlertActive((current) => {
+        if (current) {
+          return current;
+        }
 
-      if (countdownTimer.current) {
-        clearInterval(countdownTimer.current);
-      }
+        addLog(`🚨 Fall pattern detected (${source})`);
+        setCountdown(30);
 
-      countdownTimer.current = setInterval(() => {
-        setCountdown((currentCountdown) => {
-          if (currentCountdown <= 1) {
-            if (countdownTimer.current) {
-              clearInterval(countdownTimer.current);
-              countdownTimer.current = null;
+        if (countdownTimer.current) {
+          clearInterval(countdownTimer.current);
+        }
+
+        countdownTimer.current = setInterval(() => {
+          setCountdown((currentCountdown) => {
+            if (currentCountdown <= 1) {
+              if (countdownTimer.current) {
+                clearInterval(countdownTimer.current);
+                countdownTimer.current = null;
+              }
+
+              addLog("No response — sending alert to staff");
+
+              void sendFallEvent();
+
+              setAlertActive(false);
+
+              return 30;
             }
 
-            addLog("No response — sending alert to staff");
+            return currentCountdown - 1;
+          });
+        }, 1000);
 
-            void sendFallEvent();
+        return true;
+      });
+    },
+    [selectedResidentId, selectedResident],
+  );
 
-            setAlertActive(false);
-
-            return 30;
-          }
-
-          return currentCountdown - 1;
-        });
-      }, 1000);
-
-      return true;
-    });
-  }, []);
+  // ---------------------------------------------------------
+  // PHONE ACCELEROMETER
+  // ---------------------------------------------------------
 
   const handleMotion = useCallback(
     (event) => {
@@ -107,10 +178,14 @@ export default function FallDetectionPage() {
 
       setMagnitude(mag);
 
+      // Strong movement / impact
       if (mag > 2.5) {
         setMotionState("Impact spike");
         spikeDetectedAt.current = Date.now();
-      } else if (
+      }
+
+      // Sudden stillness after impact
+      else if (
         mag < 1.3 &&
         spikeDetectedAt.current &&
         Date.now() - spikeDetectedAt.current < 2000
@@ -127,7 +202,16 @@ export default function FallDetectionPage() {
     [triggerFallSequence],
   );
 
+  // ---------------------------------------------------------
+  // START MONITORING
+  // ---------------------------------------------------------
+
   async function startMonitoring() {
+    if (!selectedResidentId) {
+      addLog("Please select a resident before starting monitoring");
+      return;
+    }
+
     if (
       typeof DeviceMotionEvent !== "undefined" &&
       typeof DeviceMotionEvent.requestPermission === "function"
@@ -152,8 +236,17 @@ export default function FallDetectionPage() {
     window.addEventListener("devicemotion", motionHandlerRef.current);
 
     setMonitoring(true);
-    addLog("Monitoring started");
+
+    addLog(
+      `Monitoring started for ${
+        selectedResident?.full_name || "selected resident"
+      }`,
+    );
   }
+
+  // ---------------------------------------------------------
+  // STOP MONITORING
+  // ---------------------------------------------------------
 
   function stopMonitoring() {
     if (motionHandlerRef.current) {
@@ -176,6 +269,10 @@ export default function FallDetectionPage() {
     addLog("Monitoring stopped");
   }
 
+  // ---------------------------------------------------------
+  // I'M OK
+  // ---------------------------------------------------------
+
   function handleImOk() {
     if (countdownTimer.current) {
       clearInterval(countdownTimer.current);
@@ -187,6 +284,10 @@ export default function FallDetectionPage() {
 
     addLog("I'm OK — no alert sent");
   }
+
+  // ---------------------------------------------------------
+  // SEND ALERT NOW
+  // ---------------------------------------------------------
 
   async function handleSendAlert() {
     if (countdownTimer.current) {
@@ -203,6 +304,26 @@ export default function FallDetectionPage() {
     setAlertActive(false);
     setCountdown(30);
   }
+
+  // ---------------------------------------------------------
+  // CLEANUP
+  // ---------------------------------------------------------
+
+  useEffect(() => {
+    return () => {
+      if (motionHandlerRef.current) {
+        window.removeEventListener("devicemotion", motionHandlerRef.current);
+      }
+
+      if (countdownTimer.current) {
+        clearInterval(countdownTimer.current);
+      }
+    };
+  }, []);
+
+  // ---------------------------------------------------------
+  // UI
+  // ---------------------------------------------------------
 
   return (
     <div
@@ -226,6 +347,85 @@ export default function FallDetectionPage() {
       >
         Phone accelerometer acting as an in-room sensor
       </p>
+
+      {/* ---------------------------------------------------
+          RESIDENT SELECTION
+      --------------------------------------------------- */}
+
+      <div
+        style={{
+          border: "1px solid #ddd",
+          borderRadius: 12,
+          padding: 18,
+          marginBottom: 16,
+        }}
+      >
+        <label
+          style={{
+            display: "block",
+            fontSize: 13,
+            fontWeight: 700,
+            marginBottom: 7,
+          }}
+        >
+          Select Resident
+        </label>
+
+        <select
+          value={selectedResidentId}
+          onChange={(e) => {
+            if (monitoring) {
+              addLog("Stop monitoring before changing resident");
+              return;
+            }
+
+            setSelectedResidentId(e.target.value);
+          }}
+          disabled={monitoring || residentsLoading}
+          style={{
+            width: "100%",
+            padding: 12,
+            borderRadius: 8,
+            border: "1px solid #ccc",
+            background: "white",
+            fontSize: 14,
+          }}
+        >
+          <option value="">
+            {residentsLoading ? "Loading residents..." : "Choose resident"}
+          </option>
+
+          {residents.map((resident) => (
+            <option key={resident.id} value={resident.id}>
+              {resident.full_name}
+              {resident.room_number ? ` — Room ${resident.room_number}` : ""}
+            </option>
+          ))}
+        </select>
+
+        {selectedResident && (
+          <div
+            style={{
+              marginTop: 10,
+              padding: 10,
+              background: "#f0fdf4",
+              borderRadius: 8,
+              fontSize: 13,
+              color: "#166534",
+            }}
+          >
+            Monitoring device assigned to{" "}
+            <strong>{selectedResident.full_name}</strong>
+            {selectedResident.room_number
+              ? ` — Room ${selectedResident.room_number}`
+              : ""}
+          </div>
+        )}
+      </div>
+
+      {/* ---------------------------------------------------
+          MONITORING
+      --------------------------------------------------- */}
 
       <div
         style={{
@@ -275,6 +475,7 @@ export default function FallDetectionPage() {
 
         <button
           onClick={monitoring ? stopMonitoring : startMonitoring}
+          disabled={!selectedResidentId && !monitoring}
           style={{
             width: "100%",
             padding: 12,
@@ -284,27 +485,34 @@ export default function FallDetectionPage() {
             background: "#2F5496",
             color: "white",
             fontWeight: 600,
+            opacity: !selectedResidentId && !monitoring ? 0.5 : 1,
           }}
         >
           {monitoring ? "Stop Monitoring" : "Start Monitoring"}
         </button>
 
         <button
-          onClick={() => triggerFallSequence("test button")}
-          disabled={!monitoring}
+          onClick={() => triggerFallSequence("test simulation")}
+          disabled={!monitoring || !selectedResidentId}
           style={{
             width: "100%",
             padding: 12,
             marginTop: 8,
             borderRadius: 8,
-            border: "1px solid #ccc",
+            border: "1px solid #dc2626",
             background: "white",
-            opacity: monitoring ? 1 : 0.5,
+            color: "#dc2626",
+            fontWeight: 700,
+            opacity: monitoring && selectedResidentId ? 1 : 0.5,
           }}
         >
-          Simulate Fall (Test)
+          🚨 Simulate Fall
         </button>
       </div>
+
+      {/* ---------------------------------------------------
+          FALL ALERT
+      --------------------------------------------------- */}
 
       {alertActive && (
         <div
@@ -324,12 +532,43 @@ export default function FallDetectionPage() {
               fontSize: 16,
             }}
           >
-            Potential Fall Detected
+            🚨 Potential Fall Detected
           </h2>
 
           <p
             style={{
               margin: 0,
+              fontSize: 13,
+            }}
+          >
+            Resident:
+          </p>
+
+          <strong
+            style={{
+              display: "block",
+              fontSize: 16,
+              marginTop: 4,
+            }}
+          >
+            {selectedResident?.full_name || "Unknown resident"}
+          </strong>
+
+          {selectedResident?.room_number && (
+            <div
+              style={{
+                fontSize: 13,
+                color: "#666",
+                marginTop: 3,
+              }}
+            >
+              Room {selectedResident.room_number}
+            </div>
+          )}
+
+          <p
+            style={{
+              margin: "12px 0 0",
               fontSize: 13,
             }}
           >
@@ -379,6 +618,10 @@ export default function FallDetectionPage() {
           </button>
         </div>
       )}
+
+      {/* ---------------------------------------------------
+          ACTIVITY LOG
+      --------------------------------------------------- */}
 
       <div
         style={{
