@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { createClient } from "@/lib/supabase/client";
 
 type Resident = {
   full_name: string;
@@ -26,6 +26,87 @@ export default function LiveAlerts() {
   const [connectionStatus, setConnectionStatus] = useState("Connecting");
 
   useEffect(() => {
+    const supabase = createClient();
+
+    async function loadAlerts() {
+      setLoading(true);
+
+      try {
+        const { data, error } = await supabase
+          .from("fall_events")
+          .select(
+            `
+              id,
+              resident_id,
+              device_id,
+              z_drop,
+              doppler_spike,
+              status,
+              created_at,
+              residents (
+                full_name,
+                room_number
+              )
+            `,
+          )
+          .in("status", ["unresolved", "active"])
+          .order("created_at", {
+            ascending: false,
+          });
+
+        if (error) {
+          console.error("Failed to load emergency alerts:", error);
+          setAlerts([]);
+          return;
+        }
+
+        setAlerts((data || []) as FallEvent[]);
+      } catch (error) {
+        console.error("Emergency alert loading error:", error);
+        setAlerts([]);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    async function loadSingleAlert(
+      alert: FallEvent,
+    ): Promise<FallEvent | null> {
+      try {
+        const { data, error } = await supabase
+          .from("fall_events")
+          .select(
+            `
+              id,
+              resident_id,
+              device_id,
+              z_drop,
+              doppler_spike,
+              status,
+              created_at,
+              residents (
+                full_name,
+                room_number
+              )
+            `,
+          )
+          .eq("id", alert.id)
+          .single();
+
+        if (error) {
+          console.error("Failed to load emergency details:", error);
+
+          return alert;
+        }
+
+        return data as FallEvent;
+      } catch (error) {
+        console.error("Emergency detail loading error:", error);
+
+        return alert;
+      }
+    }
+
     loadAlerts();
 
     const channel = supabase
@@ -43,6 +124,10 @@ export default function LiveAlerts() {
           const event = await loadSingleAlert(payload.new as FallEvent);
 
           if (!event) {
+            return;
+          }
+
+          if (event.status !== "unresolved" && event.status !== "active") {
             return;
           }
 
@@ -66,7 +151,7 @@ export default function LiveAlerts() {
           schema: "public",
           table: "fall_events",
         },
-        (payload) => {
+        async (payload) => {
           const updated = payload.new as FallEvent;
 
           if (
@@ -80,16 +165,29 @@ export default function LiveAlerts() {
             return;
           }
 
-          setAlerts((current) =>
-            current.map((alert) =>
-              alert.id === updated.id
-                ? {
-                    ...alert,
-                    ...updated,
-                  }
-                : alert,
-            ),
-          );
+          if (updated.status !== "unresolved" && updated.status !== "active") {
+            return;
+          }
+
+          const completeEvent = await loadSingleAlert(updated);
+
+          if (!completeEvent) {
+            return;
+          }
+
+          setAlerts((current) => {
+            const exists = current.some(
+              (alert) => alert.id === completeEvent.id,
+            );
+
+            if (!exists) {
+              return [completeEvent, ...current];
+            }
+
+            return current.map((alert) =>
+              alert.id === completeEvent.id ? completeEvent : alert,
+            );
+          });
         },
       )
       .subscribe((status) => {
@@ -111,89 +209,14 @@ export default function LiveAlerts() {
     };
   }, []);
 
-  async function loadAlerts() {
-    setLoading(true);
-
-    try {
-      const { data, error } = await supabase
-        .from("fall_events")
-        .select(
-          `
-          id,
-          resident_id,
-          device_id,
-          z_drop,
-          doppler_spike,
-          status,
-          created_at,
-          residents (
-            full_name,
-            room_number
-          )
-        `,
-        )
-        .in("status", ["unresolved", "active"])
-        .order("created_at", {
-          ascending: false,
-        });
-
-      if (error) {
-        console.error("Failed to load emergency alerts:", error);
-
-        setAlerts([]);
-        return;
-      }
-
-      setAlerts((data || []) as FallEvent[]);
-    } catch (error) {
-      console.error(error);
-      setAlerts([]);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function loadSingleAlert(alert: FallEvent) {
-    try {
-      const { data, error } = await supabase
-        .from("fall_events")
-        .select(
-          `
-            id,
-            resident_id,
-            device_id,
-            z_drop,
-            doppler_spike,
-            status,
-            created_at,
-            residents (
-              full_name,
-              room_number
-            )
-          `,
-        )
-        .eq("id", alert.id)
-        .single();
-
-      if (error) {
-        console.error("Failed to load emergency details:", error);
-
-        return alert;
-      }
-
-      return data as FallEvent;
-    } catch (error) {
-      console.error(error);
-      return alert;
-    }
-  }
-
   async function resolveAlert(alertId: string) {
     if (resolvingId) {
       return;
     }
 
     setResolvingId(alertId);
+
+    const supabase = createClient();
 
     try {
       const { error } = await supabase
@@ -205,19 +228,18 @@ export default function LiveAlerts() {
 
       if (error) {
         console.error("Failed to resolve alert:", error);
-
         return;
       }
 
       setAlerts((current) => current.filter((alert) => alert.id !== alertId));
     } catch (error) {
-      console.error(error);
+      console.error("Resolve alert error:", error);
     } finally {
       setResolvingId(null);
     }
   }
 
-  function getResident(alert: FallEvent) {
+  function getResident(alert: FallEvent): Resident | null {
     if (!alert.residents) {
       return null;
     }
@@ -326,7 +348,7 @@ export default function LiveAlerts() {
         </div>
       )}
 
-      {/* No alerts */}
+      {/* No Alerts */}
       {!loading && alerts.length === 0 && (
         <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center shadow-sm">
           <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full border border-green-200 bg-green-50">
