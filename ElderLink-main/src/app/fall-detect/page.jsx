@@ -1,76 +1,38 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { useState, useRef, useCallback, useEffect } from "react";
+import { createClient } from "@supabase/supabase-js";
 
-export default function FallDetectPage() {
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+);
+
+export default function FallDetectionPage() {
   const [residents, setResidents] = useState([]);
   const [selectedResidentId, setSelectedResidentId] = useState("");
+  const [residentsLoading, setResidentsLoading] = useState(true);
+
   const [monitoring, setMonitoring] = useState(false);
+  const [magnitude, setMagnitude] = useState(null);
+  const [motionState, setMotionState] = useState("—");
 
   const [alertActive, setAlertActive] = useState(false);
-  const [countdown, setCountdown] = useState(12);
+  const [countdown, setCountdown] = useState(30);
+
   const [sendingAlert, setSendingAlert] = useState(false);
   const [alertSent, setAlertSent] = useState(false);
 
-  const [activityLog, setActivityLog] = useState([]);
+  const [log, setLog] = useState([]);
 
+  const spikeDetectedAt = useRef(null);
   const countdownTimer = useRef(null);
   const vibrationTimer = useRef(null);
-  const stillnessTimer = useRef(null);
-  const monitoringRef = useRef(false);
-  const fallTriggeredRef = useRef(false);
+  const motionHandlerRef = useRef(null);
 
-  useEffect(() => {
-    loadResidents();
-
-    return () => {
-      stopMonitoring();
-      stopVibration();
-
-      if (countdownTimer.current) {
-        clearInterval(countdownTimer.current);
-      }
-
-      if (stillnessTimer.current) {
-        clearTimeout(stillnessTimer.current);
-      }
-    };
-  }, []);
-
-  async function loadResidents() {
-    try {
-      const { data, error } = await supabase
-        .from("residents")
-        .select("id, full_name")
-        .order("full_name", { ascending: true });
-
-      if (error) {
-        console.error("Failed to load residents:", error);
-        addLog("Unable to load residents");
-        return;
-      }
-
-      setResidents(data || []);
-
-      if (data && data.length > 0) {
-        setSelectedResidentId(data[0].id);
-      }
-    } catch (error) {
-      console.error(error);
-      addLog("Unable to load residents");
-    }
-  }
-
-  function addLog(message) {
-    setActivityLog((prev) => [
-      {
-        message,
-        time: new Date().toLocaleTimeString(),
-      },
-      ...prev,
-    ]);
-  }
+  // ---------------------------------------------------------
+  // VIBRATION
+  // ---------------------------------------------------------
 
   function stopVibration() {
     if (vibrationTimer.current) {
@@ -78,10 +40,7 @@ export default function FallDetectPage() {
       vibrationTimer.current = null;
     }
 
-    if (
-      typeof navigator !== "undefined" &&
-      "vibrate" in navigator
-    ) {
+    if (typeof navigator !== "undefined" && "vibrate" in navigator) {
       navigator.vibrate(0);
     }
   }
@@ -89,37 +48,80 @@ export default function FallDetectPage() {
   function startVibration() {
     stopVibration();
 
-    if (
-      typeof navigator === "undefined" ||
-      !("vibrate" in navigator)
-    ) {
-      addLog("Vibration is not supported on this device");
+    if (typeof navigator === "undefined" || !("vibrate" in navigator)) {
       return;
     }
 
-    // Strong repeating vibration pattern
-    const strongPattern = [
-      900,
-      200,
-      900,
-      200,
-      900,
-      400,
-    ];
+    // Start immediately.
+    navigator.vibrate([500, 300, 500, 300]);
 
-    navigator.vibrate(strongPattern);
-
+    // Continue vibrating while the countdown is active.
     vibrationTimer.current = setInterval(() => {
       if ("vibrate" in navigator) {
-        navigator.vibrate(strongPattern);
+        navigator.vibrate([500, 300, 500, 300]);
       }
-    }, 3600);
+    }, 1600);
   }
+
+  // ---------------------------------------------------------
+  // LOAD RESIDENTS
+  // ---------------------------------------------------------
+
+  useEffect(() => {
+    async function loadResidents() {
+      setResidentsLoading(true);
+
+      const { data, error } = await supabase
+        .from("residents")
+        .select("id, full_name, room_number, status")
+        .eq("status", "active")
+        .order("full_name");
+
+      if (error) {
+        console.error("Failed to load residents:", error);
+        addLog(`Failed to load residents: ${error.message}`);
+      } else {
+        setResidents(data || []);
+
+        if (data && data.length > 0) {
+          setSelectedResidentId(data[0].id);
+        }
+      }
+
+      setResidentsLoading(false);
+    }
+
+    loadResidents();
+  }, []);
+
+  // ---------------------------------------------------------
+  // HELPER
+  // ---------------------------------------------------------
+
+  function addLog(msg) {
+    setLog((prev) =>
+      [
+        {
+          time: new Date().toLocaleTimeString(),
+          msg,
+        },
+        ...prev,
+      ].slice(0, 20),
+    );
+  }
+
+  const selectedResident = residents.find(
+    (resident) => resident.id === selectedResidentId,
+  );
+
+  // ---------------------------------------------------------
+  // SEND FALL EVENT TO STAFF DASHBOARD
+  // ---------------------------------------------------------
 
   async function sendFallEvent() {
     if (!selectedResidentId) {
-      addLog("Please select a resident");
-      return;
+      addLog("Please select a resident first");
+      return false;
     }
 
     try {
@@ -133,27 +135,40 @@ export default function FallDetectPage() {
 
       if (error) {
         console.error("Fall event error:", error);
-        addLog("Fall event could not be recorded");
+        addLog(`Failed to send staff alert: ${error.message}`);
         return false;
       }
 
-      addLog("Fall event recorded");
+      addLog(
+        `Staff alert sent for ${selectedResident?.full_name || "resident"}`,
+      );
+
       return true;
-    } catch (error) {
-      console.error(error);
-      addLog("Fall event could not be recorded");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+
+      addLog(`Failed to send staff alert: ${message}`);
+
       return false;
     }
   }
 
+  // ---------------------------------------------------------
+  // SEND AUTOMATIC SOS
+  // ---------------------------------------------------------
+
   async function sendAutomaticSOS() {
     if (!selectedResidentId) {
-      addLog("No resident selected");
+      addLog("Cannot send SOS — no resident selected");
       return false;
     }
 
+    setSendingAlert(true);
+
     try {
-      addLog("Sending emergency notifications...");
+      addLog(
+        `Sending SOS to ${selectedResident?.full_name || "family contact"}...`,
+      );
 
       const response = await fetch("/api/emergency-alert", {
         method: "POST",
@@ -167,180 +182,249 @@ export default function FallDetectPage() {
         }),
       });
 
-      const data = await response.json();
+      const result = await response.json();
 
       if (!response.ok) {
-        console.error("Emergency alert error:", data);
-        addLog("Emergency notification failed");
+        throw new Error(result.error || "SOS request failed");
+      }
+
+      const sentChannels = result.sentChannels || [];
+      const failedChannels = result.failedChannels || [];
+
+      if (sentChannels.includes("sms")) {
+        addLog("SMS SOS sent");
+      }
+
+      if (sentChannels.includes("whatsapp")) {
+        addLog("WhatsApp SOS sent");
+      }
+
+      if (sentChannels.includes("voice")) {
+        addLog("SOS phone call started");
+      }
+
+      if (failedChannels.includes("sms")) {
+        addLog("SMS SOS failed");
+      }
+
+      if (failedChannels.includes("whatsapp")) {
+        addLog("WhatsApp SOS failed");
+      }
+
+      if (failedChannels.includes("voice")) {
+        addLog("SOS phone call failed");
+      }
+
+      if (sentChannels.length === 0) {
+        addLog("No SOS channels were successfully sent");
         return false;
       }
 
-      if (data.sentChannels?.length) {
-        addLog(
-          `Emergency notifications sent: ${data.sentChannels.join(", ")}`
-        );
-      }
-
-      if (data.failedChannels?.length) {
-        addLog(
-          `Failed channels: ${data.failedChannels.join(", ")}`
-        );
-      }
+      addLog(
+        `SOS completed: ${sentChannels
+          .map((channel) => {
+            if (channel === "sms") return "SMS";
+            if (channel === "whatsapp") return "WhatsApp";
+            if (channel === "voice") return "Call";
+            return channel;
+          })
+          .join(", ")}`,
+      );
 
       return true;
-    } catch (error) {
-      console.error(error);
-      addLog("Emergency notification failed");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+
+      console.error("Automatic SOS error:", err);
+
+      addLog(`Automatic SOS failed: ${message}`);
+
       return false;
+    } finally {
+      setSendingAlert(false);
     }
   }
+
+  // ---------------------------------------------------------
+  // SEND EVERYTHING
+  // ---------------------------------------------------------
 
   async function sendCompleteEmergencyAlert() {
-    if (sendingAlert) {
-      return;
+    if (!selectedResidentId) {
+      addLog("Please select a resident first");
+
+      return {
+        staffAlertSent: false,
+        sosSent: false,
+      };
     }
 
-    setSendingAlert(true);
-    stopVibration();
+    const staffAlertSent = await sendFallEvent();
 
-    await sendFallEvent();
-    await sendAutomaticSOS();
+    const sosSent = await sendAutomaticSOS();
 
-    setSendingAlert(false);
-    setAlertSent(true);
-    setAlertActive(false);
+    if (staffAlertSent && sosSent) {
+      addLog("Complete emergency alert sent");
+    } else if (staffAlertSent) {
+      addLog("Staff alerted, but SOS delivery had a problem");
+    } else if (sosSent) {
+      addLog("SOS sent, but staff dashboard alert had a problem");
+    }
 
-    addLog("Emergency alert process completed");
+    return {
+      staffAlertSent,
+      sosSent,
+    };
   }
 
-  function triggerFallSequence(source = "fall detection") {
-    if (fallTriggeredRef.current || sendingAlert) {
-      return;
-    }
+  // ---------------------------------------------------------
+  // FALL DETECTION
+  // ---------------------------------------------------------
 
-    fallTriggeredRef.current = true;
-
-    setAlertActive(true);
-    setAlertSent(false);
-    setCountdown(12);
-
-    addLog(`Fall detected: ${source}`);
-    addLog("Emergency countdown started: 12 seconds");
-
-    startVibration();
-
-    if (countdownTimer.current) {
-      clearInterval(countdownTimer.current);
-    }
-
-    countdownTimer.current = setInterval(() => {
-      setCountdown((prev) => {
-        if (prev <= 1) {
-          clearInterval(countdownTimer.current);
-          countdownTimer.current = null;
-
-          stopVibration();
-
-          setTimeout(() => {
-            sendCompleteEmergencyAlert();
-          }, 0);
-
-          return 0;
+  const triggerFallSequence = useCallback(
+    (source) => {
+      setAlertActive((current) => {
+        if (current) {
+          return current;
         }
 
-        return prev - 1;
+        setAlertSent(false);
+
+        addLog(`Fall pattern detected (${source})`);
+
+        setCountdown(30);
+
+        // Start phone vibration immediately.
+        startVibration();
+
+        if (countdownTimer.current) {
+          clearInterval(countdownTimer.current);
+        }
+
+        countdownTimer.current = setInterval(() => {
+          setCountdown((currentCountdown) => {
+            if (currentCountdown <= 1) {
+              if (countdownTimer.current) {
+                clearInterval(countdownTimer.current);
+                countdownTimer.current = null;
+              }
+
+              // Stop vibration when countdown finishes.
+              stopVibration();
+
+              addLog("No response — sending emergency SOS");
+
+              setSendingAlert(true);
+
+              void sendCompleteEmergencyAlert().then(() => {
+                setAlertActive(false);
+                setAlertSent(true);
+                setSendingAlert(false);
+                setCountdown(30);
+              });
+
+              return 0;
+            }
+
+            return currentCountdown - 1;
+          });
+        }, 1000);
+
+        return true;
       });
-    }, 1000);
-  }
+    },
+    [selectedResidentId, selectedResident],
+  );
 
-  function handleMotion(event) {
-    if (!monitoringRef.current || fallTriggeredRef.current) {
-      return;
-    }
+  // ---------------------------------------------------------
+  // PHONE ACCELEROMETER
+  // ---------------------------------------------------------
 
-    const acceleration = event.accelerationIncludingGravity;
+  const handleMotion = useCallback(
+    (event) => {
+      const acc = event.accelerationIncludingGravity;
 
-    if (!acceleration) {
-      return;
-    }
-
-    const x = acceleration.x || 0;
-    const y = acceleration.y || 0;
-    const z = acceleration.z || 0;
-
-    const magnitude = Math.sqrt(
-      x * x + y * y + z * z
-    );
-
-    // Impact detection
-    if (magnitude > 2.5) {
-      addLog("Possible impact detected");
-
-      if (stillnessTimer.current) {
-        clearTimeout(stillnessTimer.current);
+      if (!acc || acc.x === null || acc.y === null || acc.z === null) {
+        return;
       }
 
-      // Wait briefly and check for reduced movement
-      stillnessTimer.current = setTimeout(() => {
-        if (!monitoringRef.current || fallTriggeredRef.current) {
-          return;
-        }
+      const mag =
+        Math.sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z) / 9.81;
 
-        triggerFallSequence("automatic motion detection");
-      }, 1200);
-    }
-  }
+      setMagnitude(mag);
+
+      if (mag > 2.5) {
+        setMotionState("Impact spike");
+        spikeDetectedAt.current = Date.now();
+      } else if (
+        mag < 1.3 &&
+        spikeDetectedAt.current &&
+        Date.now() - spikeDetectedAt.current < 2000
+      ) {
+        setMotionState("Stillness after spike");
+
+        triggerFallSequence("accelerometer");
+
+        spikeDetectedAt.current = null;
+      } else {
+        setMotionState("Normal");
+      }
+    },
+    [triggerFallSequence],
+  );
+
+  // ---------------------------------------------------------
+  // START MONITORING
+  // ---------------------------------------------------------
 
   async function startMonitoring() {
     if (!selectedResidentId) {
-      addLog("Please select a resident before starting");
+      addLog("Please select a resident before starting monitoring");
       return;
     }
 
-    try {
-      // iPhone/iPad motion permission
-      if (
-        typeof DeviceMotionEvent !== "undefined" &&
-        typeof DeviceMotionEvent.requestPermission === "function"
-      ) {
-        const permission =
-          await DeviceMotionEvent.requestPermission();
+    if (
+      typeof DeviceMotionEvent !== "undefined" &&
+      typeof DeviceMotionEvent.requestPermission === "function"
+    ) {
+      try {
+        const permission = await DeviceMotionEvent.requestPermission();
 
         if (permission !== "granted") {
-          addLog("Motion permission was not granted");
+          addLog("Motion permission denied");
           return;
         }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+
+        addLog(`Permission request failed: ${message}`);
+        return;
       }
-
-      window.addEventListener(
-        "devicemotion",
-        handleMotion
-      );
-
-      monitoringRef.current = true;
-      fallTriggeredRef.current = false;
-
-      setMonitoring(true);
-      setAlertSent(false);
-
-      addLog("Fall detection monitoring started");
-    } catch (error) {
-      console.error(error);
-      addLog("Unable to start motion detection");
     }
+
+    motionHandlerRef.current = handleMotion;
+
+    window.addEventListener("devicemotion", motionHandlerRef.current);
+
+    setMonitoring(true);
+    setAlertSent(false);
+
+    addLog(
+      `Monitoring started for ${
+        selectedResident?.full_name || "selected resident"
+      }`,
+    );
   }
 
+  // ---------------------------------------------------------
+  // STOP MONITORING
+  // ---------------------------------------------------------
+
   function stopMonitoring() {
-    window.removeEventListener(
-      "devicemotion",
-      handleMotion
-    );
+    if (motionHandlerRef.current) {
+      window.removeEventListener("devicemotion", motionHandlerRef.current);
 
-    monitoringRef.current = false;
-
-    if (stillnessTimer.current) {
-      clearTimeout(stillnessTimer.current);
-      stillnessTimer.current = null;
+      motionHandlerRef.current = null;
     }
 
     if (countdownTimer.current) {
@@ -351,15 +435,19 @@ export default function FallDetectPage() {
     stopVibration();
 
     setMonitoring(false);
+    setMagnitude(null);
+    setMotionState("—");
+    setAlertActive(false);
+    setAlertSent(false);
+    setSendingAlert(false);
+    setCountdown(30);
 
-    if (alertActive) {
-      setAlertActive(false);
-    }
-
-    fallTriggeredRef.current = false;
-
-    addLog("Fall detection monitoring stopped");
+    addLog("Monitoring stopped");
   }
+
+  // ---------------------------------------------------------
+  // I'M OK
+  // ---------------------------------------------------------
 
   function handleImOk() {
     if (countdownTimer.current) {
@@ -370,14 +458,26 @@ export default function FallDetectPage() {
     stopVibration();
 
     setAlertActive(false);
-    setCountdown(12);
+    setAlertSent(false);
+    setCountdown(30);
 
-    fallTriggeredRef.current = false;
-
-    addLog("Resident confirmed they are OK");
+    addLog("I'm OK — no alert sent");
   }
 
-  function handleSendAlert() {
+  // ---------------------------------------------------------
+  // SEND ALERT NOW
+  // ---------------------------------------------------------
+
+  async function handleSendAlert() {
+    if (sendingAlert) {
+      return;
+    }
+
+    if (!selectedResidentId) {
+      addLog("Please select a resident first");
+      return;
+    }
+
     if (countdownTimer.current) {
       clearInterval(countdownTimer.current);
       countdownTimer.current = null;
@@ -385,349 +485,726 @@ export default function FallDetectPage() {
 
     stopVibration();
 
-    sendCompleteEmergencyAlert();
-  }
+    setAlertActive(false);
+    setSendingAlert(true);
 
-  function handleTestFall() {
-    if (!selectedResidentId) {
-      addLog("Please select a resident first");
-      return;
+    const result = await sendCompleteEmergencyAlert();
+
+    setSendingAlert(false);
+    setCountdown(30);
+
+    if (result.staffAlertSent || result.sosSent) {
+      setAlertSent(true);
     }
-
-    triggerFallSequence("test simulation");
   }
 
-  const selectedResident = residents.find(
-    (resident) => resident.id === selectedResidentId
-  );
+  // ---------------------------------------------------------
+  // CLEANUP
+  // ---------------------------------------------------------
+
+  useEffect(() => {
+    return () => {
+      if (motionHandlerRef.current) {
+        window.removeEventListener("devicemotion", motionHandlerRef.current);
+      }
+
+      if (countdownTimer.current) {
+        clearInterval(countdownTimer.current);
+      }
+
+      stopVibration();
+    };
+  }, []);
+
+  // ---------------------------------------------------------
+  // UI
+  // ---------------------------------------------------------
 
   return (
-    <main className="min-h-screen bg-slate-50 px-4 py-6 sm:px-6 lg:px-8">
-      <div className="mx-auto max-w-5xl">
-        {/* Header */}
-        <div className="mb-6">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h1 className="text-2xl font-bold text-slate-900">
-                Fall Detection
-              </h1>
+    <div
+      style={{
+        minHeight: "100vh",
+        background: "#f5f7fb",
+        padding: "24px 16px 40px",
+        fontFamily:
+          "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        color: "#172033",
+      }}
+    >
+      <div
+        style={{
+          width: "100%",
+          maxWidth: 520,
+          margin: "0 auto",
+        }}
+      >
+        {/* HEADER */}
 
-              <p className="mt-1 text-sm text-slate-500">
-                Mobile emergency monitoring system
-              </p>
+        <div
+          style={{
+            background: "white",
+            borderRadius: 18,
+            padding: "22px 20px",
+            marginBottom: 16,
+            boxShadow: "0 2px 12px rgba(0,0,0,0.06)",
+          }}
+        >
+          <div
+            style={{
+              fontSize: 12,
+              fontWeight: 800,
+              color: "#2F5496",
+              textTransform: "uppercase",
+              letterSpacing: "0.08em",
+              marginBottom: 6,
+            }}
+          >
+            ElderLink
+          </div>
+
+          <h1
+            style={{
+              fontSize: 25,
+              margin: 0,
+              fontWeight: 800,
+              lineHeight: 1.2,
+            }}
+          >
+            Fall Detection
+          </h1>
+
+          <p
+            style={{
+              color: "#667085",
+              fontSize: 14,
+              lineHeight: 1.5,
+              margin: "8px 0 0",
+            }}
+          >
+            Your phone acts as an in-room fall detection sensor.
+          </p>
+        </div>
+
+        {/* RESIDENT */}
+
+        <div
+          style={{
+            background: "white",
+            borderRadius: 18,
+            padding: 20,
+            marginBottom: 16,
+            boxShadow: "0 2px 12px rgba(0,0,0,0.06)",
+          }}
+        >
+          <div
+            style={{
+              fontSize: 14,
+              fontWeight: 800,
+              marginBottom: 10,
+            }}
+          >
+            Resident
+          </div>
+
+          <select
+            value={selectedResidentId}
+            onChange={(e) => {
+              if (monitoring) {
+                addLog("Stop monitoring before changing resident");
+                return;
+              }
+
+              setSelectedResidentId(e.target.value);
+              setAlertSent(false);
+            }}
+            disabled={monitoring || residentsLoading}
+            style={{
+              width: "100%",
+              boxSizing: "border-box",
+              padding: "14px 12px",
+              borderRadius: 12,
+              border: "1px solid #d0d5dd",
+              background: "white",
+              fontSize: 15,
+              outline: "none",
+            }}
+          >
+            <option value="">
+              {residentsLoading ? "Loading residents..." : "Choose resident"}
+            </option>
+
+            {residents.map((resident) => (
+              <option key={resident.id} value={resident.id}>
+                {resident.full_name}
+                {resident.room_number ? ` — Room ${resident.room_number}` : ""}
+              </option>
+            ))}
+          </select>
+
+          {selectedResident && (
+            <div
+              style={{
+                marginTop: 12,
+                padding: 14,
+                background: "#eff6ff",
+                borderRadius: 12,
+                border: "1px solid #bfdbfe",
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 12,
+                  color: "#475467",
+                  marginBottom: 3,
+                }}
+              >
+                Monitoring resident
+              </div>
+
+              <div
+                style={{
+                  fontSize: 16,
+                  fontWeight: 800,
+                  color: "#1e3a8a",
+                }}
+              >
+                {selectedResident.full_name}
+              </div>
+
+              {selectedResident.room_number && (
+                <div
+                  style={{
+                    fontSize: 13,
+                    color: "#475467",
+                    marginTop: 3,
+                  }}
+                >
+                  Room {selectedResident.room_number}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* MONITORING */}
+
+        <div
+          style={{
+            background: "white",
+            borderRadius: 18,
+            padding: 20,
+            marginBottom: 16,
+            boxShadow: "0 2px 12px rgba(0,0,0,0.06)",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: 18,
+            }}
+          >
+            <div
+              style={{
+                fontSize: 15,
+                fontWeight: 800,
+              }}
+            >
+              Monitoring
             </div>
 
             <div
-              className={`inline-flex w-fit items-center gap-2 rounded-full border px-3 py-2 text-sm font-semibold ${
-                monitoring
-                  ? "border-green-200 bg-green-50 text-green-700"
-                  : "border-slate-200 bg-white text-slate-600"
-              }`}
+              style={{
+                padding: "6px 10px",
+                borderRadius: 999,
+                background: monitoring ? "#dcfce7" : "#f2f4f7",
+                color: monitoring ? "#166534" : "#667085",
+                fontSize: 12,
+                fontWeight: 800,
+              }}
             >
-              <span
-                className={`h-2.5 w-2.5 rounded-full ${
-                  monitoring
-                    ? "bg-green-500 animate-pulse"
-                    : "bg-slate-400"
-                }`}
-              />
-
-              {monitoring
-                ? "Monitoring Active"
-                : "Monitoring Off"}
+              {monitoring ? "● ACTIVE" : "● OFF"}
             </div>
           </div>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: 10,
+              marginBottom: 14,
+            }}
+          >
+            <div
+              style={{
+                background: "#f8fafc",
+                borderRadius: 12,
+                padding: 14,
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 11,
+                  color: "#667085",
+                  marginBottom: 5,
+                }}
+              >
+                Acceleration
+              </div>
+
+              <div
+                style={{
+                  fontSize: 18,
+                  fontWeight: 800,
+                }}
+              >
+                {magnitude !== null ? `${magnitude.toFixed(2)} g` : "—"}
+              </div>
+            </div>
+
+            <div
+              style={{
+                background: "#f8fafc",
+                borderRadius: 12,
+                padding: 14,
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 11,
+                  color: "#667085",
+                  marginBottom: 5,
+                }}
+              >
+                Motion
+              </div>
+
+              <div
+                style={{
+                  fontSize: 14,
+                  fontWeight: 800,
+                }}
+              >
+                {motionState}
+              </div>
+            </div>
+          </div>
+
+          <button
+            onClick={monitoring ? stopMonitoring : startMonitoring}
+            disabled={!selectedResidentId && !monitoring}
+            style={{
+              width: "100%",
+              padding: 14,
+              borderRadius: 12,
+              border: "none",
+              background: monitoring ? "#344054" : "#2F5496",
+              color: "white",
+              fontWeight: 800,
+              fontSize: 15,
+              cursor: "pointer",
+              opacity: !selectedResidentId && !monitoring ? 0.5 : 1,
+            }}
+          >
+            {monitoring ? "Stop Monitoring" : "Start Monitoring"}
+          </button>
+
+          <button
+            onClick={() => triggerFallSequence("test simulation")}
+            disabled={!monitoring || !selectedResidentId || sendingAlert}
+            style={{
+              width: "100%",
+              padding: 14,
+              marginTop: 10,
+              borderRadius: 12,
+              border: "2px solid #dc2626",
+              background: "white",
+              color: "#dc2626",
+              fontWeight: 800,
+              fontSize: 15,
+              cursor: "pointer",
+              opacity:
+                monitoring && selectedResidentId && !sendingAlert ? 1 : 0.45,
+            }}
+          >
+            Simulate Fall
+          </button>
         </div>
 
-        {/* Emergency Alert */}
+        {/* FALL ALERT */}
+
         {alertActive && (
-          <section className="mb-6 overflow-hidden rounded-2xl border border-red-200 bg-white shadow-sm">
-            <div className="border-b border-red-100 bg-red-50 px-5 py-4">
-              <div className="flex items-center gap-3">
-                <div className="flex h-11 w-11 items-center justify-center rounded-full bg-red-600 text-xl font-bold text-white">
-                  !
-                </div>
+          <div
+            style={{
+              background: "#fff1f2",
+              border: "2px solid #ef4444",
+              borderRadius: 20,
+              padding: 22,
+              marginBottom: 16,
+              textAlign: "center",
+              boxShadow: "0 4px 18px rgba(220,38,38,0.12)",
+            }}
+          >
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 46,
+                height: 46,
+                borderRadius: "50%",
+                background: "#dc2626",
+                color: "white",
+                fontSize: 24,
+                fontWeight: 900,
+                marginBottom: 8,
+              }}
+            >
+              !
+            </div>
 
-                <div>
-                  <h2 className="text-lg font-bold text-red-900">
-                    LIVE EMERGENCY
-                  </h2>
+            <h2
+              style={{
+                color: "#b91c1c",
+                margin: 0,
+                fontSize: 21,
+                fontWeight: 900,
+              }}
+            >
+              FALL DETECTED
+            </h2>
 
-                  <p className="text-sm text-red-700">
-                    Possible fall detected. Emergency alert will be sent automatically.
-                  </p>
-                </div>
+            <div
+              style={{
+                marginTop: 12,
+                fontSize: 15,
+                fontWeight: 800,
+              }}
+            >
+              {selectedResident?.full_name || "Unknown resident"}
+            </div>
+
+            {selectedResident?.room_number && (
+              <div
+                style={{
+                  color: "#667085",
+                  fontSize: 13,
+                  marginTop: 3,
+                }}
+              >
+                Room {selectedResident.room_number}
+              </div>
+            )}
+
+            <div
+              style={{
+                marginTop: 18,
+                color: "#475467",
+                fontSize: 14,
+                fontWeight: 600,
+              }}
+            >
+              Please confirm that you are safe.
+            </div>
+
+            {/* COUNTDOWN */}
+
+            <div
+              style={{
+                width: 130,
+                height: 130,
+                margin: "16px auto",
+                borderRadius: "50%",
+                background: "white",
+                border: "7px solid #ef4444",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexDirection: "column",
+                boxSizing: "border-box",
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 48,
+                  lineHeight: 1,
+                  fontWeight: 900,
+                  color: "#b91c1c",
+                }}
+              >
+                {countdown}
+              </div>
+
+              <div
+                style={{
+                  fontSize: 11,
+                  color: "#667085",
+                  fontWeight: 700,
+                  marginTop: 5,
+                }}
+              >
+                SECONDS
               </div>
             </div>
 
-            <div className="px-5 py-6">
-              <div className="text-center">
-                <p className="text-sm font-medium uppercase tracking-wide text-slate-500">
-                  Alert in
-                </p>
+            <button
+              onClick={handleImOk}
+              disabled={sendingAlert}
+              style={{
+                width: "100%",
+                padding: 15,
+                borderRadius: 12,
+                border: "none",
+                background: "#16a34a",
+                color: "white",
+                fontWeight: 900,
+                fontSize: 15,
+                cursor: "pointer",
+                opacity: sendingAlert ? 0.5 : 1,
+              }}
+            >
+              I&apos;M OK
+            </button>
 
-                <div className="mt-2 text-7xl font-bold tabular-nums text-red-600">
-                  {countdown}
-                </div>
+            <button
+              onClick={handleSendAlert}
+              disabled={sendingAlert}
+              style={{
+                width: "100%",
+                padding: 15,
+                marginTop: 10,
+                borderRadius: 12,
+                border: "none",
+                background: "#dc2626",
+                color: "white",
+                fontWeight: 900,
+                fontSize: 15,
+                cursor: "pointer",
+                opacity: sendingAlert ? 0.65 : 1,
+              }}
+            >
+              {sendingAlert ? "Sending Emergency Alert..." : "SEND ALERT NOW"}
+            </button>
 
-                <p className="mt-2 text-sm text-slate-500">
-                  seconds
-                </p>
-              </div>
-
-              <div className="mt-6 grid gap-3 sm:grid-cols-2">
-                <button
-                  type="button"
-                  onClick={handleImOk}
-                  disabled={sendingAlert}
-                  className="rounded-xl border border-slate-300 bg-white px-5 py-3 font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  I&apos;m OK
-                </button>
-
-                <button
-                  type="button"
-                  onClick={handleSendAlert}
-                  disabled={sendingAlert}
-                  className="rounded-xl bg-red-600 px-5 py-3 font-semibold text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {sendingAlert
-                    ? "Sending Alert..."
-                    : "Send Alert Now"}
-                </button>
-              </div>
-            </div>
-          </section>
-        )}
-
-        {/* Alert Sent */}
-        {alertSent && !alertActive && (
-          <section className="mb-6 rounded-2xl border border-green-200 bg-green-50 p-5">
-            <div className="flex items-start gap-3">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-green-600 font-bold text-white">
-                ✓
-              </div>
-
-              <div>
-                <h2 className="font-bold text-green-900">
-                  Emergency Alert Sent
-                </h2>
-
-                <p className="mt-1 text-sm text-green-700">
-                  The emergency notification process has been completed.
-                </p>
-              </div>
-            </div>
-          </section>
-        )}
-
-        <div className="grid gap-6 lg:grid-cols-3">
-          {/* Main Controls */}
-          <section className="lg:col-span-2">
-            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-              <h2 className="text-lg font-bold text-slate-900">
-                Monitoring Setup
-              </h2>
-
-              <p className="mt-1 text-sm text-slate-500">
-                Select the resident and start mobile fall detection.
-              </p>
-
-              {/* Resident */}
-              <div className="mt-6">
-                <label
-                  htmlFor="resident"
-                  className="mb-2 block text-sm font-semibold text-slate-700"
-                >
-                  Resident
-                </label>
-
-                <select
-                  id="resident"
-                  value={selectedResidentId}
-                  onChange={(event) =>
-                    setSelectedResidentId(
-                      event.target.value
-                    )
-                  }
-                  disabled={monitoring || alertActive}
-                  className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-800 outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200 disabled:bg-slate-100"
-                >
-                  <option value="">
-                    Select resident
-                  </option>
-
-                  {residents.map((resident) => (
-                    <option
-                      key={resident.id}
-                      value={resident.id}
-                    >
-                      {resident.full_name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Selected Resident */}
-              {selectedResident && (
-                <div className="mt-4 rounded-xl bg-slate-50 p-4">
-                  <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                    Selected Resident
-                  </p>
-
-                  <p className="mt-1 font-semibold text-slate-900">
-                    {selectedResident.full_name}
-                  </p>
-                </div>
-              )}
-
-              {/* Controls */}
-              <div className="mt-6 grid gap-3 sm:grid-cols-2">
-                {!monitoring ? (
-                  <button
-                    type="button"
-                    onClick={startMonitoring}
-                    disabled={!selectedResidentId}
-                    className="rounded-xl bg-slate-900 px-5 py-3 font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Start Monitoring
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={stopMonitoring}
-                    disabled={alertActive}
-                    className="rounded-xl border border-slate-300 bg-white px-5 py-3 font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Stop Monitoring
-                  </button>
-                )}
-
-                <button
-                  type="button"
-                  onClick={handleTestFall}
-                  disabled={
-                    !selectedResidentId ||
-                    sendingAlert ||
-                    alertActive
-                  }
-                  className="rounded-xl border border-red-200 bg-red-50 px-5 py-3 font-semibold text-red-700 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Test Fall Alert
-                </button>
-              </div>
-
-              {/* Status */}
-              <div className="mt-6 border-t border-slate-100 pt-5">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-slate-500">
-                    Detection Status
-                  </span>
-
-                  <span
-                    className={`font-semibold ${
-                      monitoring
-                        ? "text-green-600"
-                        : "text-slate-500"
-                    }`}
-                  >
-                    {monitoring ? "Active" : "Inactive"}
-                  </span>
-                </div>
-
-                <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
-                  <div
-                    className={`h-full rounded-full transition-all ${
-                      monitoring
-                        ? "w-full bg-green-500"
-                        : "w-0"
-                    }`}
-                  />
-                </div>
-              </div>
-            </div>
-          </section>
-
-          {/* Activity Log */}
-          <section>
-            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-              <div className="flex items-center justify-between">
-                <h2 className="text-lg font-bold text-slate-900">
-                  Activity
-                </h2>
-
-                <span className="text-xs text-slate-400">
-                  Live
-                </span>
-              </div>
-
-              <div className="mt-4 max-h-[420px] space-y-3 overflow-y-auto">
-                {activityLog.length === 0 ? (
-                  <div className="rounded-xl bg-slate-50 p-4 text-center">
-                    <p className="text-sm text-slate-500">
-                      No activity yet
-                    </p>
-                  </div>
-                ) : (
-                  activityLog.map((item, index) => (
-                    <div
-                      key={`${item.time}-${index}`}
-                      className="border-b border-slate-100 pb-3 last:border-0"
-                    >
-                      <p className="text-sm text-slate-700">
-                        {item.message}
-                      </p>
-
-                      <p className="mt-1 text-xs text-slate-400">
-                        {item.time}
-                      </p>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          </section>
-        </div>
-
-        {/* Emergency Information */}
-        <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <h2 className="font-bold text-slate-900">
-            Emergency Response
-          </h2>
-
-          <div className="mt-4 grid gap-4 sm:grid-cols-3">
-            <div className="rounded-xl bg-slate-50 p-4">
-              <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                Detection
-              </p>
-
-              <p className="mt-1 font-semibold text-slate-900">
-                Motion Sensor
-              </p>
-            </div>
-
-            <div className="rounded-xl bg-slate-50 p-4">
-              <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                Countdown
-              </p>
-
-              <p className="mt-1 font-semibold text-slate-900">
-                12 Seconds
-              </p>
-            </div>
-
-            <div className="rounded-xl bg-slate-50 p-4">
-              <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                Notifications
-              </p>
-
-              <p className="mt-1 font-semibold text-slate-900">
-                SMS / WhatsApp / Voice
-              </p>
+            <div
+              style={{
+                marginTop: 12,
+                fontSize: 11,
+                color: "#667085",
+              }}
+            >
+              The phone will vibrate while this countdown is active.
             </div>
           </div>
-        </section>
+        )}
+
+        {/* SENDING STATUS */}
+
+        {sendingAlert && !alertActive && (
+          <div
+            style={{
+              background: "#fff7ed",
+              border: "2px solid #fb923c",
+              borderRadius: 18,
+              padding: 22,
+              marginBottom: 16,
+              textAlign: "center",
+            }}
+          >
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 42,
+                height: 42,
+                borderRadius: "50%",
+                background: "#f97316",
+                color: "white",
+                fontWeight: 900,
+                marginBottom: 8,
+              }}
+            >
+              ...
+            </div>
+
+            <div
+              style={{
+                fontSize: 18,
+                fontWeight: 900,
+                color: "#c2410c",
+              }}
+            >
+              Sending Emergency Alert
+            </div>
+
+            <div
+              style={{
+                marginTop: 7,
+                fontSize: 13,
+                color: "#667085",
+              }}
+            >
+              Notifying staff and family...
+            </div>
+          </div>
+        )}
+
+        {/* ALERT SENT */}
+
+        {alertSent && !alertActive && !sendingAlert && (
+          <div
+            style={{
+              background: "#ecfdf3",
+              border: "2px solid #22c55e",
+              borderRadius: 18,
+              padding: 22,
+              marginBottom: 16,
+              textAlign: "center",
+            }}
+          >
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 46,
+                height: 46,
+                borderRadius: "50%",
+                background: "#16a34a",
+                color: "white",
+                fontSize: 24,
+                fontWeight: 900,
+                marginBottom: 8,
+              }}
+            >
+              ✓
+            </div>
+
+            <div
+              style={{
+                fontSize: 20,
+                fontWeight: 900,
+                color: "#166534",
+              }}
+            >
+              Emergency Alert Sent
+            </div>
+
+            <div
+              style={{
+                marginTop: 8,
+                fontSize: 14,
+                color: "#475467",
+              }}
+            >
+              {selectedResident?.full_name || "Resident"} has been reported to
+              the care team.
+            </div>
+
+            <div
+              style={{
+                marginTop: 14,
+                padding: 12,
+                background: "white",
+                borderRadius: 12,
+                fontSize: 13,
+                color: "#166534",
+                fontWeight: 700,
+                lineHeight: 1.8,
+              }}
+            >
+              Staff notified
+              <br />
+              Family emergency process started
+              <br />
+              SMS / WhatsApp / Voice attempted
+            </div>
+
+            <button
+              onClick={() => setAlertSent(false)}
+              style={{
+                width: "100%",
+                padding: 12,
+                marginTop: 14,
+                borderRadius: 10,
+                border: "1px solid #bbf7d0",
+                background: "white",
+                color: "#166534",
+                fontWeight: 800,
+                cursor: "pointer",
+              }}
+            >
+              Continue Monitoring
+            </button>
+          </div>
+        )}
+
+        {/* ACTIVITY LOG */}
+
+        <div
+          style={{
+            background: "white",
+            borderRadius: 18,
+            padding: 18,
+            boxShadow: "0 2px 12px rgba(0,0,0,0.06)",
+          }}
+        >
+          <div
+            style={{
+              fontWeight: 800,
+              fontSize: 14,
+              marginBottom: 10,
+            }}
+          >
+            Activity Log
+          </div>
+
+          <div
+            style={{
+              maxHeight: 220,
+              overflowY: "auto",
+            }}
+          >
+            {log.length === 0 && (
+              <div
+                style={{
+                  fontSize: 12,
+                  color: "#98a2b3",
+                  padding: "8px 0",
+                }}
+              >
+                Waiting to start...
+              </div>
+            )}
+
+            {log.map((entry, i) => (
+              <div
+                key={i}
+                style={{
+                  fontSize: 12,
+                  color: "#667085",
+                  padding: "7px 0",
+                  borderBottom: "1px solid #f2f4f7",
+                  lineHeight: 1.4,
+                }}
+              >
+                <span
+                  style={{
+                    color: "#98a2b3",
+                    marginRight: 5,
+                  }}
+                >
+                  {entry.time}
+                </span>
+
+                {entry.msg}
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
-    </main>
+    </div>
   );
 }
