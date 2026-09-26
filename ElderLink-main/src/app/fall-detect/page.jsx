@@ -17,12 +17,30 @@ export default function FallDetectPage() {
 
   const [activityLog, setActivityLog] = useState([]);
 
+  // Live accelerometer values
+  const [accelerometer, setAccelerometer] = useState({
+    x: 0,
+    y: 0,
+    z: 0,
+    magnitude: 0,
+  });
+
+  const [sensorStatus, setSensorStatus] = useState("Not active");
+
   const countdownTimer = useRef(null);
   const vibrationTimer = useRef(null);
-  const stillnessTimer = useRef(null);
+  const fallConfirmationTimer = useRef(null);
+  const activityLogTimer = useRef(null);
 
   const monitoringRef = useRef(false);
   const fallTriggeredRef = useRef(false);
+
+  // Used for free-fall detection
+  const freeFallDetectedRef = useRef(false);
+  const freeFallTimerRef = useRef(null);
+
+  // Prevent activity log from being flooded
+  const lastSensorLogRef = useRef(0);
 
   useEffect(() => {
     loadResidents();
@@ -34,8 +52,16 @@ export default function FallDetectPage() {
         clearInterval(countdownTimer.current);
       }
 
-      if (stillnessTimer.current) {
-        clearTimeout(stillnessTimer.current);
+      if (fallConfirmationTimer.current) {
+        clearTimeout(fallConfirmationTimer.current);
+      }
+
+      if (freeFallTimerRef.current) {
+        clearTimeout(freeFallTimerRef.current);
+      }
+
+      if (activityLogTimer.current) {
+        clearInterval(activityLogTimer.current);
       }
 
       stopVibration();
@@ -128,6 +154,7 @@ export default function FallDetectPage() {
       }
 
       addLog("Fall event recorded successfully");
+
       return true;
     } catch (error) {
       console.error(error);
@@ -163,6 +190,7 @@ export default function FallDetectPage() {
         console.error("Emergency notification error:", data);
 
         addLog("Emergency notification failed");
+
         return false;
       }
 
@@ -177,7 +205,9 @@ export default function FallDetectPage() {
       return true;
     } catch (error) {
       console.error(error);
+
       addLog("Emergency notification failed");
+
       return false;
     }
   }
@@ -265,42 +295,122 @@ export default function FallDetectPage() {
 
     const magnitude = Math.sqrt(x * x + y * y + z * z);
 
-    /*
-      Impact threshold.
-      A strong movement above this value
-      starts the fall confirmation process.
-    */
-    if (magnitude > 2.5) {
-      addLog("Possible impact detected");
+    // Update live accelerometer display
+    setAccelerometer({
+      x,
+      y,
+      z,
+      magnitude,
+    });
 
-      if (stillnessTimer.current) {
-        clearTimeout(stillnessTimer.current);
+    /*
+      FREE-FALL DETECTION
+
+      When the phone is falling, the accelerometer
+      can temporarily approach 0 because the phone
+      and its sensor are falling together.
+    */
+
+    if (magnitude < 0.8) {
+      if (!freeFallDetectedRef.current) {
+        freeFallDetectedRef.current = true;
+
+        addLog("Free-fall movement detected");
+
+        setSensorStatus("Free-fall detected");
+
+        if (freeFallTimerRef.current) {
+          clearTimeout(freeFallTimerRef.current);
+        }
+
+        // Free-fall must be followed by impact
+        // within 2 seconds.
+        freeFallTimerRef.current = setTimeout(() => {
+          freeFallDetectedRef.current = false;
+
+          if (monitoringRef.current) {
+            setSensorStatus("Monitoring");
+          }
+        }, 2000);
+      }
+    }
+
+    /*
+      STRONG IMPACT DETECTION
+
+      A strong impact is usually a sudden spike
+      in acceleration.
+    */
+
+    if (magnitude > 2.5) {
+      setSensorStatus("Impact detected");
+
+      const wasFreeFall = freeFallDetectedRef.current;
+
+      if (wasFreeFall) {
+        addLog("Free-fall followed by impact detected");
+
+        freeFallDetectedRef.current = false;
+
+        if (freeFallTimerRef.current) {
+          clearTimeout(freeFallTimerRef.current);
+
+          freeFallTimerRef.current = null;
+        }
+
+        /*
+          Give the phone a short moment after impact
+          before starting the emergency countdown.
+        */
+
+        if (fallConfirmationTimer.current) {
+          clearTimeout(fallConfirmationTimer.current);
+        }
+
+        fallConfirmationTimer.current = setTimeout(() => {
+          if (monitoringRef.current && !fallTriggeredRef.current) {
+            triggerFallSequence("Phone drop / fall detected");
+          }
+        }, 500);
+
+        return;
       }
 
       /*
-        Wait briefly after impact before
-        triggering the emergency sequence.
+        Also detect a strong impact even when
+        free-fall was not captured by the browser.
       */
-      stillnessTimer.current = setTimeout(() => {
-        if (!monitoringRef.current || fallTriggeredRef.current) {
-          return;
-        }
 
-        triggerFallSequence("Automatic fall detection");
-      }, 1200);
+      addLog("Strong impact detected");
+
+      if (fallConfirmationTimer.current) {
+        clearTimeout(fallConfirmationTimer.current);
+      }
+
+      fallConfirmationTimer.current = setTimeout(() => {
+        if (monitoringRef.current && !fallTriggeredRef.current) {
+          triggerFallSequence("Automatic fall detection");
+        }
+      }, 800);
+    } else {
+      if (magnitude >= 0.8 && magnitude <= 2.5) {
+        setSensorStatus("Monitoring");
+      }
     }
   }
 
   async function startMonitoring() {
     if (!selectedResidentId) {
       addLog("Please select a resident first");
+
       return;
     }
 
     try {
       /*
-        iPhone/iPad motion permission.
+        iPhone / iPad motion permission.
       */
+
       if (
         typeof DeviceMotionEvent !== "undefined" &&
         typeof DeviceMotionEvent.requestPermission === "function"
@@ -309,6 +419,7 @@ export default function FallDetectPage() {
 
         if (permission !== "granted") {
           addLog("Motion permission was not granted");
+
           return;
         }
       }
@@ -317,11 +428,15 @@ export default function FallDetectPage() {
 
       monitoringRef.current = true;
       fallTriggeredRef.current = false;
+      freeFallDetectedRef.current = false;
 
       setMonitoring(true);
       setAlertSent(false);
+      setSensorStatus("Monitoring");
 
       addLog("Fall detection monitoring started");
+
+      addLog("Accelerometer sensor connected");
     } catch (error) {
       console.error(error);
 
@@ -334,25 +449,35 @@ export default function FallDetectPage() {
 
     monitoringRef.current = false;
 
-    if (stillnessTimer.current) {
-      clearTimeout(stillnessTimer.current);
-      stillnessTimer.current = null;
+    if (fallConfirmationTimer.current) {
+      clearTimeout(fallConfirmationTimer.current);
+
+      fallConfirmationTimer.current = null;
+    }
+
+    if (freeFallTimerRef.current) {
+      clearTimeout(freeFallTimerRef.current);
+
+      freeFallTimerRef.current = null;
     }
 
     if (countdownTimer.current) {
       clearInterval(countdownTimer.current);
+
       countdownTimer.current = null;
     }
 
     stopVibration();
 
     setMonitoring(false);
+    setSensorStatus("Not active");
 
     if (alertActive) {
       setAlertActive(false);
     }
 
     fallTriggeredRef.current = false;
+    freeFallDetectedRef.current = false;
 
     addLog("Fall detection monitoring stopped");
   }
@@ -360,6 +485,7 @@ export default function FallDetectPage() {
   function handleImOk() {
     if (countdownTimer.current) {
       clearInterval(countdownTimer.current);
+
       countdownTimer.current = null;
     }
 
@@ -376,6 +502,7 @@ export default function FallDetectPage() {
   function handleSendAlert() {
     if (countdownTimer.current) {
       clearInterval(countdownTimer.current);
+
       countdownTimer.current = null;
     }
 
@@ -387,6 +514,7 @@ export default function FallDetectPage() {
   function handleTestFall() {
     if (!selectedResidentId) {
       addLog("Please select a resident first");
+
       return;
     }
 
@@ -399,8 +527,9 @@ export default function FallDetectPage() {
 
   return (
     <main className="min-h-screen bg-slate-50 px-4 py-6 sm:px-6 lg:px-8">
-      <div className="mx-auto max-w-5xl">
-        {/* Header */}
+      <div className="mx-auto max-w-6xl">
+        {/* HEADER */}
+
         <div className="mb-6">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
@@ -431,7 +560,8 @@ export default function FallDetectPage() {
           </div>
         </div>
 
-        {/* Live Emergency */}
+        {/* LIVE EMERGENCY */}
+
         {alertActive && (
           <section className="mb-6 overflow-hidden rounded-2xl border border-red-200 bg-white shadow-md">
             <div className="border-b border-red-200 bg-red-50 px-5 py-5 sm:px-6">
@@ -475,8 +605,8 @@ export default function FallDetectPage() {
                 </p>
 
                 <p className="mt-1 text-xs text-red-600">
-                  Press &quot;I&apos;m OK&quot; to cancel the emergency response
-                  or send the alert immediately.
+                  Press "I'm OK" to cancel the emergency response or send the
+                  alert immediately.
                 </p>
               </div>
 
@@ -487,7 +617,7 @@ export default function FallDetectPage() {
                   disabled={sendingAlert}
                   className="rounded-xl border border-slate-300 bg-white px-5 py-3 font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  I&apos;m OK
+                  I'm OK
                 </button>
 
                 <button
@@ -503,7 +633,8 @@ export default function FallDetectPage() {
           </section>
         )}
 
-        {/* Alert Sent */}
+        {/* ALERT SENT */}
+
         {alertSent && !alertActive && (
           <section className="mb-6 rounded-2xl border border-green-200 bg-green-50 p-5">
             <div className="flex items-start gap-3">
@@ -525,7 +656,8 @@ export default function FallDetectPage() {
         )}
 
         <div className="grid gap-6 lg:grid-cols-3">
-          {/* Monitoring Setup */}
+          {/* MONITORING SETUP */}
+
           <section className="lg:col-span-2">
             <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
               <h2 className="text-lg font-bold text-slate-900">
@@ -536,7 +668,8 @@ export default function FallDetectPage() {
                 Select a resident and start fall detection.
               </p>
 
-              {/* Resident */}
+              {/* RESIDENT */}
+
               <div className="mt-6">
                 <label
                   htmlFor="resident"
@@ -564,7 +697,8 @@ export default function FallDetectPage() {
                 </select>
               </div>
 
-              {/* Resident Information */}
+              {/* RESIDENT INFO */}
+
               {selectedResident && (
                 <div className="mt-4 rounded-xl bg-slate-50 p-4">
                   <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
@@ -583,7 +717,8 @@ export default function FallDetectPage() {
                 </div>
               )}
 
-              {/* Buttons */}
+              {/* BUTTONS */}
+
               <div className="mt-6 grid gap-3 sm:grid-cols-2">
                 {!monitoring ? (
                   <button
@@ -615,7 +750,116 @@ export default function FallDetectPage() {
                 </button>
               </div>
 
-              {/* Status */}
+              {/* ACCELEROMETER */}
+
+              <div className="mt-6 border-t border-slate-100 pt-5">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <h3 className="font-semibold text-slate-900">
+                      Accelerometer
+                    </h3>
+
+                    <p className="text-xs text-slate-500">
+                      Live device motion data
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 text-sm">
+                    <span
+                      className={`h-2.5 w-2.5 rounded-full ${
+                        monitoring
+                          ? "animate-pulse bg-green-500"
+                          : "bg-slate-400"
+                      }`}
+                    />
+
+                    <span className="font-medium text-slate-600">
+                      {sensorStatus}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                    <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                      X
+                    </p>
+
+                    <p className="mt-1 font-mono text-lg font-bold text-slate-900">
+                      {accelerometer.x.toFixed(2)}
+                    </p>
+
+                    <p className="text-xs text-slate-400">m/s²</p>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                    <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                      Y
+                    </p>
+
+                    <p className="mt-1 font-mono text-lg font-bold text-slate-900">
+                      {accelerometer.y.toFixed(2)}
+                    </p>
+
+                    <p className="text-xs text-slate-400">m/s²</p>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                    <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                      Z
+                    </p>
+
+                    <p className="mt-1 font-mono text-lg font-bold text-slate-900">
+                      {accelerometer.z.toFixed(2)}
+                    </p>
+
+                    <p className="text-xs text-slate-400">m/s²</p>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 bg-slate-900 p-4">
+                    <p className="text-xs font-medium uppercase tracking-wide text-slate-300">
+                      Magnitude
+                    </p>
+
+                    <p className="mt-1 font-mono text-lg font-bold text-white">
+                      {accelerometer.magnitude.toFixed(2)}
+                    </p>
+
+                    <p className="text-xs text-slate-400">m/s²</p>
+                  </div>
+                </div>
+
+                <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-slate-500">
+                      Impact threshold
+                    </span>
+
+                    <span className="font-mono text-sm font-semibold text-slate-900">
+                      2.50 m/s²
+                    </span>
+                  </div>
+
+                  <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
+                    <div
+                      className={`h-full rounded-full transition-all ${
+                        accelerometer.magnitude > 2.5
+                          ? "bg-red-500"
+                          : "bg-green-500"
+                      }`}
+                      style={{
+                        width: `${Math.min(
+                          (accelerometer.magnitude / 5) * 100,
+                          100,
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* DETECTION STATUS */}
+
               <div className="mt-6 border-t border-slate-100 pt-5">
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-slate-500">
@@ -642,14 +886,79 @@ export default function FallDetectPage() {
             </div>
           </section>
 
-          {/* Activity */}
+          {/* ACTIVITY */}
+
           <section>
             <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
               <div className="flex items-center justify-between">
-                <h2 className="text-lg font-bold text-slate-900">Activity</h2>
+                <div>
+                  <h2 className="text-lg font-bold text-slate-900">Activity</h2>
 
-                <span className="text-xs text-slate-400">Live</span>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Real-time detection events
+                  </p>
+                </div>
+
+                <span
+                  className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                    monitoring
+                      ? "bg-green-50 text-green-700"
+                      : "bg-slate-100 text-slate-500"
+                  }`}
+                >
+                  {monitoring ? "LIVE" : "OFFLINE"}
+                </span>
               </div>
+
+              {/* Current sensor summary */}
+
+              <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Sensor Status
+                  </span>
+
+                  <span className="text-xs font-semibold text-slate-700">
+                    {sensorStatus}
+                  </span>
+                </div>
+
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <div>
+                    <p className="text-xs text-slate-400">X</p>
+
+                    <p className="font-mono text-sm font-semibold text-slate-800">
+                      {accelerometer.x.toFixed(2)}
+                    </p>
+                  </div>
+
+                  <div>
+                    <p className="text-xs text-slate-400">Y</p>
+
+                    <p className="font-mono text-sm font-semibold text-slate-800">
+                      {accelerometer.y.toFixed(2)}
+                    </p>
+                  </div>
+
+                  <div>
+                    <p className="text-xs text-slate-400">Z</p>
+
+                    <p className="font-mono text-sm font-semibold text-slate-800">
+                      {accelerometer.z.toFixed(2)}
+                    </p>
+                  </div>
+
+                  <div>
+                    <p className="text-xs text-slate-400">Magnitude</p>
+
+                    <p className="font-mono text-sm font-semibold text-slate-800">
+                      {accelerometer.magnitude.toFixed(2)}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Activity log */}
 
               <div className="mt-4 max-h-[420px] space-y-3 overflow-y-auto">
                 {activityLog.length === 0 ? (
@@ -673,7 +982,8 @@ export default function FallDetectPage() {
           </section>
         </div>
 
-        {/* System Information */}
+        {/* SYSTEM INFORMATION */}
+
         <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="font-bold text-slate-900">Emergency Response</h2>
 
