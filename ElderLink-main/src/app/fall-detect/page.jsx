@@ -1,11 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { supabase } from "@/lib/supabase";
 
 export default function FallDetectPage() {
-  const supabase = createClient();
-
   const [residents, setResidents] = useState([]);
   const [selectedResidentId, setSelectedResidentId] = useState("");
   const [monitoring, setMonitoring] = useState(false);
@@ -20,7 +18,6 @@ export default function FallDetectPage() {
   const countdownTimer = useRef(null);
   const vibrationTimer = useRef(null);
   const stillnessTimer = useRef(null);
-
   const monitoringRef = useRef(false);
   const fallTriggeredRef = useRef(false);
 
@@ -28,7 +25,8 @@ export default function FallDetectPage() {
     loadResidents();
 
     return () => {
-      window.removeEventListener("devicemotion", handleMotion);
+      stopMonitoring();
+      stopVibration();
 
       if (countdownTimer.current) {
         clearInterval(countdownTimer.current);
@@ -37,8 +35,6 @@ export default function FallDetectPage() {
       if (stillnessTimer.current) {
         clearTimeout(stillnessTimer.current);
       }
-
-      stopVibration();
     };
   }, []);
 
@@ -46,7 +42,7 @@ export default function FallDetectPage() {
     try {
       const { data, error } = await supabase
         .from("residents")
-        .select("id, full_name, room_number")
+        .select("id, full_name")
         .order("full_name", { ascending: true });
 
       if (error) {
@@ -67,12 +63,12 @@ export default function FallDetectPage() {
   }
 
   function addLog(message) {
-    setActivityLog((previous) => [
+    setActivityLog((prev) => [
       {
         message,
         time: new Date().toLocaleTimeString(),
       },
-      ...previous,
+      ...prev,
     ]);
   }
 
@@ -82,7 +78,10 @@ export default function FallDetectPage() {
       vibrationTimer.current = null;
     }
 
-    if (typeof navigator !== "undefined" && "vibrate" in navigator) {
+    if (
+      typeof navigator !== "undefined" &&
+      "vibrate" in navigator
+    ) {
       navigator.vibrate(0);
     }
   }
@@ -90,12 +89,23 @@ export default function FallDetectPage() {
   function startVibration() {
     stopVibration();
 
-    if (typeof navigator === "undefined" || !("vibrate" in navigator)) {
+    if (
+      typeof navigator === "undefined" ||
+      !("vibrate" in navigator)
+    ) {
       addLog("Vibration is not supported on this device");
       return;
     }
 
-    const strongPattern = [900, 200, 900, 200, 900, 400];
+    // Strong repeating vibration pattern
+    const strongPattern = [
+      900,
+      200,
+      900,
+      200,
+      900,
+      400,
+    ];
 
     navigator.vibrate(strongPattern);
 
@@ -108,8 +118,8 @@ export default function FallDetectPage() {
 
   async function sendFallEvent() {
     if (!selectedResidentId) {
-      addLog("No resident selected");
-      return false;
+      addLog("Please select a resident");
+      return;
     }
 
     try {
@@ -127,7 +137,7 @@ export default function FallDetectPage() {
         return false;
       }
 
-      addLog("Fall event recorded successfully");
+      addLog("Fall event recorded");
       return true;
     } catch (error) {
       console.error(error);
@@ -160,18 +170,21 @@ export default function FallDetectPage() {
       const data = await response.json();
 
       if (!response.ok) {
-        console.error("Emergency notification error:", data);
-
+        console.error("Emergency alert error:", data);
         addLog("Emergency notification failed");
         return false;
       }
 
       if (data.sentChannels?.length) {
-        addLog(`Sent: ${data.sentChannels.join(", ")}`);
+        addLog(
+          `Emergency notifications sent: ${data.sentChannels.join(", ")}`
+        );
       }
 
       if (data.failedChannels?.length) {
-        addLog(`Failed: ${data.failedChannels.join(", ")}`);
+        addLog(
+          `Failed channels: ${data.failedChannels.join(", ")}`
+        );
       }
 
       return true;
@@ -188,28 +201,20 @@ export default function FallDetectPage() {
     }
 
     setSendingAlert(true);
-
     stopVibration();
 
-    addLog("Starting emergency response");
-
-    const fallRecorded = await sendFallEvent();
-
-    if (fallRecorded) {
-      await sendAutomaticSOS();
-    }
+    await sendFallEvent();
+    await sendAutomaticSOS();
 
     setSendingAlert(false);
     setAlertSent(true);
     setAlertActive(false);
 
-    fallTriggeredRef.current = false;
-
-    addLog("Emergency response completed");
+    addLog("Emergency alert process completed");
   }
 
-  function triggerFallSequence(source = "Fall detection") {
-    if (fallTriggeredRef.current || sendingAlert || !selectedResidentId) {
+  function triggerFallSequence(source = "fall detection") {
+    if (fallTriggeredRef.current || sendingAlert) {
       return;
     }
 
@@ -219,8 +224,8 @@ export default function FallDetectPage() {
     setAlertSent(false);
     setCountdown(12);
 
-    addLog(`${source} detected`);
-    addLog("12-second emergency countdown started");
+    addLog(`Fall detected: ${source}`);
+    addLog("Emergency countdown started: 12 seconds");
 
     startVibration();
 
@@ -229,8 +234,8 @@ export default function FallDetectPage() {
     }
 
     countdownTimer.current = setInterval(() => {
-      setCountdown((previous) => {
-        if (previous <= 1) {
+      setCountdown((prev) => {
+        if (prev <= 1) {
           clearInterval(countdownTimer.current);
           countdownTimer.current = null;
 
@@ -243,7 +248,7 @@ export default function FallDetectPage() {
           return 0;
         }
 
-        return previous - 1;
+        return prev - 1;
       });
     }, 1000);
   }
@@ -263,13 +268,11 @@ export default function FallDetectPage() {
     const y = acceleration.y || 0;
     const z = acceleration.z || 0;
 
-    const magnitude = Math.sqrt(x * x + y * y + z * z);
+    const magnitude = Math.sqrt(
+      x * x + y * y + z * z
+    );
 
-    /*
-      Impact threshold.
-      A strong movement above this value
-      starts the fall confirmation process.
-    */
+    // Impact detection
     if (magnitude > 2.5) {
       addLog("Possible impact detected");
 
@@ -277,35 +280,31 @@ export default function FallDetectPage() {
         clearTimeout(stillnessTimer.current);
       }
 
-      /*
-        Wait briefly after impact before
-        triggering the emergency sequence.
-      */
+      // Wait briefly and check for reduced movement
       stillnessTimer.current = setTimeout(() => {
         if (!monitoringRef.current || fallTriggeredRef.current) {
           return;
         }
 
-        triggerFallSequence("Automatic fall detection");
+        triggerFallSequence("automatic motion detection");
       }, 1200);
     }
   }
 
   async function startMonitoring() {
     if (!selectedResidentId) {
-      addLog("Please select a resident first");
+      addLog("Please select a resident before starting");
       return;
     }
 
     try {
-      /*
-        iPhone/iPad motion permission.
-      */
+      // iPhone/iPad motion permission
       if (
         typeof DeviceMotionEvent !== "undefined" &&
         typeof DeviceMotionEvent.requestPermission === "function"
       ) {
-        const permission = await DeviceMotionEvent.requestPermission();
+        const permission =
+          await DeviceMotionEvent.requestPermission();
 
         if (permission !== "granted") {
           addLog("Motion permission was not granted");
@@ -313,7 +312,10 @@ export default function FallDetectPage() {
         }
       }
 
-      window.addEventListener("devicemotion", handleMotion);
+      window.addEventListener(
+        "devicemotion",
+        handleMotion
+      );
 
       monitoringRef.current = true;
       fallTriggeredRef.current = false;
@@ -324,13 +326,15 @@ export default function FallDetectPage() {
       addLog("Fall detection monitoring started");
     } catch (error) {
       console.error(error);
-
       addLog("Unable to start motion detection");
     }
   }
 
   function stopMonitoring() {
-    window.removeEventListener("devicemotion", handleMotion);
+    window.removeEventListener(
+      "devicemotion",
+      handleMotion
+    );
 
     monitoringRef.current = false;
 
@@ -390,11 +394,11 @@ export default function FallDetectPage() {
       return;
     }
 
-    triggerFallSequence("Test fall simulation");
+    triggerFallSequence("test simulation");
   }
 
   const selectedResident = residents.find(
-    (resident) => resident.id === selectedResidentId,
+    (resident) => resident.id === selectedResidentId
   );
 
   return (
@@ -422,65 +426,56 @@ export default function FallDetectPage() {
             >
               <span
                 className={`h-2.5 w-2.5 rounded-full ${
-                  monitoring ? "animate-pulse bg-green-500" : "bg-slate-400"
+                  monitoring
+                    ? "bg-green-500 animate-pulse"
+                    : "bg-slate-400"
                 }`}
               />
 
-              {monitoring ? "Monitoring Active" : "Monitoring Off"}
+              {monitoring
+                ? "Monitoring Active"
+                : "Monitoring Off"}
             </div>
           </div>
         </div>
 
-        {/* Live Emergency */}
+        {/* Emergency Alert */}
         {alertActive && (
-          <section className="mb-6 overflow-hidden rounded-2xl border border-red-200 bg-white shadow-md">
-            <div className="border-b border-red-200 bg-red-50 px-5 py-5 sm:px-6">
+          <section className="mb-6 overflow-hidden rounded-2xl border border-red-200 bg-white shadow-sm">
+            <div className="border-b border-red-100 bg-red-50 px-5 py-4">
               <div className="flex items-center gap-3">
-                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-red-600 text-xl font-bold text-white">
+                <div className="flex h-11 w-11 items-center justify-center rounded-full bg-red-600 text-xl font-bold text-white">
                   !
                 </div>
 
                 <div>
-                  <div className="flex items-center gap-2">
-                    <h2 className="text-lg font-bold text-red-900">
-                      LIVE EMERGENCY
-                    </h2>
+                  <h2 className="text-lg font-bold text-red-900">
+                    LIVE EMERGENCY
+                  </h2>
 
-                    <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-red-500" />
-                  </div>
-
-                  <p className="mt-1 text-sm text-red-700">
-                    Possible fall detected
+                  <p className="text-sm text-red-700">
+                    Possible fall detected. Emergency alert will be sent automatically.
                   </p>
                 </div>
               </div>
             </div>
 
-            <div className="px-5 py-7 sm:px-6">
+            <div className="px-5 py-6">
               <div className="text-center">
-                <p className="text-sm font-semibold uppercase tracking-wider text-slate-500">
-                  Emergency alert in
+                <p className="text-sm font-medium uppercase tracking-wide text-slate-500">
+                  Alert in
                 </p>
 
                 <div className="mt-2 text-7xl font-bold tabular-nums text-red-600">
                   {countdown}
                 </div>
 
-                <p className="mt-2 text-sm text-slate-500">seconds</p>
-              </div>
-
-              <div className="mx-auto mt-6 max-w-xl rounded-xl border border-red-100 bg-red-50 p-4 text-center">
-                <p className="text-sm font-medium text-red-800">
-                  The phone is vibrating.
-                </p>
-
-                <p className="mt-1 text-xs text-red-600">
-                  Press &quot;I&apos;m OK&quot; to cancel the emergency response
-                  or send the alert immediately.
+                <p className="mt-2 text-sm text-slate-500">
+                  seconds
                 </p>
               </div>
 
-              <div className="mx-auto mt-6 grid max-w-xl gap-3 sm:grid-cols-2">
+              <div className="mt-6 grid gap-3 sm:grid-cols-2">
                 <button
                   type="button"
                   onClick={handleImOk}
@@ -496,7 +491,9 @@ export default function FallDetectPage() {
                   disabled={sendingAlert}
                   className="rounded-xl bg-red-600 px-5 py-3 font-semibold text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {sendingAlert ? "Sending Alert..." : "Send Alert Now"}
+                  {sendingAlert
+                    ? "Sending Alert..."
+                    : "Send Alert Now"}
                 </button>
               </div>
             </div>
@@ -517,7 +514,7 @@ export default function FallDetectPage() {
                 </h2>
 
                 <p className="mt-1 text-sm text-green-700">
-                  Emergency notifications have been sent.
+                  The emergency notification process has been completed.
                 </p>
               </div>
             </div>
@@ -525,7 +522,7 @@ export default function FallDetectPage() {
         )}
 
         <div className="grid gap-6 lg:grid-cols-3">
-          {/* Monitoring Setup */}
+          {/* Main Controls */}
           <section className="lg:col-span-2">
             <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
               <h2 className="text-lg font-bold text-slate-900">
@@ -533,7 +530,7 @@ export default function FallDetectPage() {
               </h2>
 
               <p className="mt-1 text-sm text-slate-500">
-                Select a resident and start fall detection.
+                Select the resident and start mobile fall detection.
               </p>
 
               {/* Resident */}
@@ -549,22 +546,29 @@ export default function FallDetectPage() {
                   id="resident"
                   value={selectedResidentId}
                   onChange={(event) =>
-                    setSelectedResidentId(event.target.value)
+                    setSelectedResidentId(
+                      event.target.value
+                    )
                   }
                   disabled={monitoring || alertActive}
                   className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-800 outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200 disabled:bg-slate-100"
                 >
-                  <option value="">Select resident</option>
+                  <option value="">
+                    Select resident
+                  </option>
 
                   {residents.map((resident) => (
-                    <option key={resident.id} value={resident.id}>
+                    <option
+                      key={resident.id}
+                      value={resident.id}
+                    >
                       {resident.full_name}
                     </option>
                   ))}
                 </select>
               </div>
 
-              {/* Resident Information */}
+              {/* Selected Resident */}
               {selectedResident && (
                 <div className="mt-4 rounded-xl bg-slate-50 p-4">
                   <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
@@ -574,16 +578,10 @@ export default function FallDetectPage() {
                   <p className="mt-1 font-semibold text-slate-900">
                     {selectedResident.full_name}
                   </p>
-
-                  {selectedResident.room_number && (
-                    <p className="mt-1 text-sm text-slate-500">
-                      Room {selectedResident.room_number}
-                    </p>
-                  )}
                 </div>
               )}
 
-              {/* Buttons */}
+              {/* Controls */}
               <div className="mt-6 grid gap-3 sm:grid-cols-2">
                 {!monitoring ? (
                   <button
@@ -608,7 +606,11 @@ export default function FallDetectPage() {
                 <button
                   type="button"
                   onClick={handleTestFall}
-                  disabled={!selectedResidentId || sendingAlert || alertActive}
+                  disabled={
+                    !selectedResidentId ||
+                    sendingAlert ||
+                    alertActive
+                  }
                   className="rounded-xl border border-red-200 bg-red-50 px-5 py-3 font-semibold text-red-700 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Test Fall Alert
@@ -624,7 +626,9 @@ export default function FallDetectPage() {
 
                   <span
                     className={`font-semibold ${
-                      monitoring ? "text-green-600" : "text-slate-500"
+                      monitoring
+                        ? "text-green-600"
+                        : "text-slate-500"
                     }`}
                   >
                     {monitoring ? "Active" : "Inactive"}
@@ -634,7 +638,9 @@ export default function FallDetectPage() {
                 <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
                   <div
                     className={`h-full rounded-full transition-all ${
-                      monitoring ? "w-full bg-green-500" : "w-0"
+                      monitoring
+                        ? "w-full bg-green-500"
+                        : "w-0"
                     }`}
                   />
                 </div>
@@ -642,19 +648,25 @@ export default function FallDetectPage() {
             </div>
           </section>
 
-          {/* Activity */}
+          {/* Activity Log */}
           <section>
             <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
               <div className="flex items-center justify-between">
-                <h2 className="text-lg font-bold text-slate-900">Activity</h2>
+                <h2 className="text-lg font-bold text-slate-900">
+                  Activity
+                </h2>
 
-                <span className="text-xs text-slate-400">Live</span>
+                <span className="text-xs text-slate-400">
+                  Live
+                </span>
               </div>
 
               <div className="mt-4 max-h-[420px] space-y-3 overflow-y-auto">
                 {activityLog.length === 0 ? (
                   <div className="rounded-xl bg-slate-50 p-4 text-center">
-                    <p className="text-sm text-slate-500">No activity yet</p>
+                    <p className="text-sm text-slate-500">
+                      No activity yet
+                    </p>
                   </div>
                 ) : (
                   activityLog.map((item, index) => (
@@ -662,9 +674,13 @@ export default function FallDetectPage() {
                       key={`${item.time}-${index}`}
                       className="border-b border-slate-100 pb-3 last:border-0"
                     >
-                      <p className="text-sm text-slate-700">{item.message}</p>
+                      <p className="text-sm text-slate-700">
+                        {item.message}
+                      </p>
 
-                      <p className="mt-1 text-xs text-slate-400">{item.time}</p>
+                      <p className="mt-1 text-xs text-slate-400">
+                        {item.time}
+                      </p>
                     </div>
                   ))
                 )}
@@ -673,9 +689,11 @@ export default function FallDetectPage() {
           </section>
         </div>
 
-        {/* System Information */}
+        {/* Emergency Information */}
         <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <h2 className="font-bold text-slate-900">Emergency Response</h2>
+          <h2 className="font-bold text-slate-900">
+            Emergency Response
+          </h2>
 
           <div className="mt-4 grid gap-4 sm:grid-cols-3">
             <div className="rounded-xl bg-slate-50 p-4">
@@ -683,7 +701,9 @@ export default function FallDetectPage() {
                 Detection
               </p>
 
-              <p className="mt-1 font-semibold text-slate-900">Motion Sensor</p>
+              <p className="mt-1 font-semibold text-slate-900">
+                Motion Sensor
+              </p>
             </div>
 
             <div className="rounded-xl bg-slate-50 p-4">
@@ -691,7 +711,9 @@ export default function FallDetectPage() {
                 Countdown
               </p>
 
-              <p className="mt-1 font-semibold text-slate-900">12 Seconds</p>
+              <p className="mt-1 font-semibold text-slate-900">
+                12 Seconds
+              </p>
             </div>
 
             <div className="rounded-xl bg-slate-50 p-4">
