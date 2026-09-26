@@ -210,7 +210,7 @@ export default function LiveAlerts() {
 
             <div className="flex items-center gap-2 rounded-full border border-red-200 bg-red-50 px-3 py-1.5">
               <span
-                className={`h-2.5 w-2.5 rounded-full ${
+                className={`h-2 w-2 rounded-full ${
                   alerts.length > 0
                     ? "animate-pulse bg-red-500"
                     : "bg-green-500"
@@ -218,11 +218,11 @@ export default function LiveAlerts() {
               />
 
               <span
-                className={`text-xs font-bold uppercase tracking-wide ${
+                className={`text-xs font-semibold uppercase tracking-wide ${
                   alerts.length > 0 ? "text-red-700" : "text-green-700"
                 }`}
               >
-                {alerts.length > 0 ? "LIVE EMERGENCY" : "SYSTEM CLEAR"}
+                {alerts.length > 0 ? "Active Emergency" : "System Normal"}
               </span>
             </div>
           </div>
@@ -262,7 +262,19 @@ export default function LiveAlerts() {
       {!loading && alerts.length === 0 && (
         <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center shadow-sm">
           <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-green-50">
-            <span className="text-xl font-bold text-green-600">✓</span>
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              className="h-7 w-7 text-green-600"
+            >
+              <path
+                d="M5 13l4 4L19 7"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
           </div>
 
           <h3 className="mt-4 text-lg font-bold text-slate-900">
@@ -293,8 +305,20 @@ export default function LiveAlerts() {
               <div className="border-b border-red-200 bg-red-50 px-5 py-4 sm:px-6">
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                   <div className="flex items-center gap-3">
-                    <div className="flex h-12 w-12 items-center justify-center rounded-full bg-red-600 text-xl font-bold text-white">
-                      !
+                    <div className="flex h-12 w-12 items-center justify-center rounded-full bg-red-600 text-white">
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        className="h-6 w-6"
+                      >
+                        <path
+                          d="M12 9v4m0 4h.01M10.29 3.86l-8.4 14.55A1.5 1.5 0 003.19 21h17.62a1.5 1.5 0 001.3-2.59l-8.4-14.55a1.5 1.5 0 00-2.6 0z"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
                     </div>
 
                     <div>
@@ -318,7 +342,7 @@ export default function LiveAlerts() {
                     </p>
 
                     <p className="mt-0.5 text-sm font-bold text-red-800">
-                      ACTIVE
+                      Active
                     </p>
                   </div>
                 </div>
@@ -351,7 +375,7 @@ export default function LiveAlerts() {
                     </p>
 
                     <p className="mt-2 font-bold text-slate-900">
-                      {alert.device_id || "PHONE"}
+                      {alert.device_id || "Phone"}
                     </p>
 
                     <p className="mt-1 text-sm text-slate-500">
