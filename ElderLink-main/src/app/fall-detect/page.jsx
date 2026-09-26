@@ -1,14 +1,11 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
-import { createClient } from "@supabase/supabase-js";
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-);
+import { createClient } from "@/lib/supabase/client";
 
 export default function FallDetectionPage() {
+  const supabase = createClient();
+
   const [residents, setResidents] = useState([]);
   const [selectedResidentId, setSelectedResidentId] = useState("");
   const [residentsLoading, setResidentsLoading] = useState(true);
@@ -18,10 +15,12 @@ export default function FallDetectionPage() {
   const [motionState, setMotionState] = useState("—");
 
   const [alertActive, setAlertActive] = useState(false);
-  const [countdown, setCountdown] = useState(30);
+  const [countdown, setCountdown] = useState(12);
 
   const [sendingAlert, setSendingAlert] = useState(false);
   const [alertSent, setAlertSent] = useState(false);
+
+  const [confirmationMessage, setConfirmationMessage] = useState("");
 
   const [log, setLog] = useState([]);
 
@@ -52,15 +51,29 @@ export default function FallDetectionPage() {
       return;
     }
 
-    // Start immediately.
     navigator.vibrate([500, 300, 500, 300]);
 
-    // Continue vibrating while the countdown is active.
     vibrationTimer.current = setInterval(() => {
       if ("vibrate" in navigator) {
         navigator.vibrate([500, 300, 500, 300]);
       }
     }, 1600);
+  }
+
+  // ---------------------------------------------------------
+  // ACTIVITY LOG
+  // ---------------------------------------------------------
+
+  function addLog(msg) {
+    setLog((prev) =>
+      [
+        {
+          time: new Date().toLocaleTimeString(),
+          msg,
+        },
+        ...prev,
+      ].slice(0, 20),
+    );
   }
 
   // ---------------------------------------------------------
@@ -94,22 +107,6 @@ export default function FallDetectionPage() {
     loadResidents();
   }, []);
 
-  // ---------------------------------------------------------
-  // HELPER
-  // ---------------------------------------------------------
-
-  function addLog(msg) {
-    setLog((prev) =>
-      [
-        {
-          time: new Date().toLocaleTimeString(),
-          msg,
-        },
-        ...prev,
-      ].slice(0, 20),
-    );
-  }
-
   const selectedResident = residents.find(
     (resident) => resident.id === selectedResidentId,
   );
@@ -140,7 +137,9 @@ export default function FallDetectionPage() {
       }
 
       addLog(
-        `Staff alert sent for ${selectedResident?.full_name || "resident"}`,
+        `Staff live alert sent for ${
+          selectedResident?.full_name || "resident"
+        }`,
       );
 
       return true;
@@ -259,8 +258,18 @@ export default function FallDetectionPage() {
       };
     }
 
+    /*
+     * IMPORTANT:
+     * First create the fall_events record.
+     * This is what the desktop staff Live Alerts dashboard
+     * listens for through Supabase Realtime.
+     */
     const staffAlertSent = await sendFallEvent();
 
+    /*
+     * Then start the family emergency process.
+     * This keeps your existing working SMS / WhatsApp / Voice flow.
+     */
     const sosSent = await sendAutomaticSOS();
 
     if (staffAlertSent && sosSent) {
@@ -278,6 +287,32 @@ export default function FallDetectionPage() {
   }
 
   // ---------------------------------------------------------
+  // SHOW EMERGENCY CONFIRMATION
+  // ---------------------------------------------------------
+
+  function showEmergencyConfirmation(result) {
+    if (result.staffAlertSent && result.sosSent) {
+      setConfirmationMessage(
+        "Emergency alert sent successfully. Staff have been notified and the family emergency process has started.",
+      );
+    } else if (result.staffAlertSent) {
+      setConfirmationMessage(
+        "Staff have been notified. There was a problem delivering one or more family emergency notifications.",
+      );
+    } else if (result.sosSent) {
+      setConfirmationMessage(
+        "Family emergency notifications were sent, but the staff dashboard alert could not be created.",
+      );
+    } else {
+      setConfirmationMessage(
+        "The emergency alert could not be sent. Please check the activity log.",
+      );
+    }
+
+    setAlertSent(true);
+  }
+
+  // ---------------------------------------------------------
   // FALL DETECTION
   // ---------------------------------------------------------
 
@@ -289,12 +324,13 @@ export default function FallDetectionPage() {
         }
 
         setAlertSent(false);
+        setConfirmationMessage("");
 
         addLog(`Fall pattern detected (${source})`);
 
-        setCountdown(30);
+        // 12 SECOND COUNTDOWN
+        setCountdown(12);
 
-        // Start phone vibration immediately.
         startVibration();
 
         if (countdownTimer.current) {
@@ -309,18 +345,18 @@ export default function FallDetectionPage() {
                 countdownTimer.current = null;
               }
 
-              // Stop vibration when countdown finishes.
               stopVibration();
 
-              addLog("No response — sending emergency SOS");
+              addLog("12-second countdown finished — sending emergency alert");
 
               setSendingAlert(true);
 
-              void sendCompleteEmergencyAlert().then(() => {
+              void sendCompleteEmergencyAlert().then((result) => {
                 setAlertActive(false);
-                setAlertSent(true);
                 setSendingAlert(false);
-                setCountdown(30);
+                setCountdown(12);
+
+                showEmergencyConfirmation(result);
               });
 
               return 0;
@@ -408,6 +444,7 @@ export default function FallDetectionPage() {
 
     setMonitoring(true);
     setAlertSent(false);
+    setConfirmationMessage("");
 
     addLog(
       `Monitoring started for ${
@@ -440,7 +477,8 @@ export default function FallDetectionPage() {
     setAlertActive(false);
     setAlertSent(false);
     setSendingAlert(false);
-    setCountdown(30);
+    setConfirmationMessage("");
+    setCountdown(12);
 
     addLog("Monitoring stopped");
   }
@@ -458,10 +496,15 @@ export default function FallDetectionPage() {
     stopVibration();
 
     setAlertActive(false);
-    setAlertSent(false);
-    setCountdown(30);
+    setSendingAlert(false);
+    setAlertSent(true);
+    setCountdown(12);
 
-    addLog("I'm OK — no alert sent");
+    setConfirmationMessage(
+      "You confirmed that you are safe. No emergency alert was sent.",
+    );
+
+    addLog("I'm OK selected — no alert sent");
   }
 
   // ---------------------------------------------------------
@@ -488,14 +531,26 @@ export default function FallDetectionPage() {
     setAlertActive(false);
     setSendingAlert(true);
 
+    addLog("Emergency alert requested manually");
+
     const result = await sendCompleteEmergencyAlert();
 
     setSendingAlert(false);
-    setCountdown(30);
+    setCountdown(12);
 
-    if (result.staffAlertSent || result.sosSent) {
-      setAlertSent(true);
-    }
+    showEmergencyConfirmation(result);
+  }
+
+  // ---------------------------------------------------------
+  // RESET CONFIRMATION
+  // ---------------------------------------------------------
+
+  function continueMonitoring() {
+    setAlertSent(false);
+    setConfirmationMessage("");
+    setCountdown(12);
+
+    addLog("Ready to continue monitoring");
   }
 
   // ---------------------------------------------------------
@@ -616,6 +671,7 @@ export default function FallDetectionPage() {
 
               setSelectedResidentId(e.target.value);
               setAlertSent(false);
+              setConfirmationMessage("");
             }}
             disabled={monitoring || residentsLoading}
             style={{
@@ -724,7 +780,7 @@ export default function FallDetectionPage() {
                 fontWeight: 800,
               }}
             >
-              {monitoring ? "● ACTIVE" : "● OFF"}
+              {monitoring ? "ACTIVE" : "OFF"}
             </div>
           </div>
 
@@ -908,7 +964,7 @@ export default function FallDetectionPage() {
               Please confirm that you are safe.
             </div>
 
-            {/* COUNTDOWN */}
+            {/* 12 SECOND COUNTDOWN */}
 
             <div
               style={{
@@ -1014,23 +1070,6 @@ export default function FallDetectionPage() {
           >
             <div
               style={{
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                width: 42,
-                height: 42,
-                borderRadius: "50%",
-                background: "#f97316",
-                color: "white",
-                fontWeight: 900,
-                marginBottom: 8,
-              }}
-            >
-              ...
-            </div>
-
-            <div
-              style={{
                 fontSize: 18,
                 fontWeight: 900,
                 color: "#c2410c",
@@ -1051,13 +1090,21 @@ export default function FallDetectionPage() {
           </div>
         )}
 
-        {/* ALERT SENT */}
+        {/* CONFIRMATION */}
 
         {alertSent && !alertActive && !sendingAlert && (
           <div
             style={{
-              background: "#ecfdf3",
-              border: "2px solid #22c55e",
+              background: confirmationMessage.includes(
+                "No emergency alert was sent",
+              )
+                ? "#eff6ff"
+                : "#ecfdf3",
+              border: confirmationMessage.includes(
+                "No emergency alert was sent",
+              )
+                ? "2px solid #60a5fa"
+                : "2px solid #22c55e",
               borderRadius: 18,
               padding: 22,
               marginBottom: 16,
@@ -1072,24 +1119,36 @@ export default function FallDetectionPage() {
                 width: 46,
                 height: 46,
                 borderRadius: "50%",
-                background: "#16a34a",
+                background: confirmationMessage.includes(
+                  "No emergency alert was sent",
+                )
+                  ? "#2563eb"
+                  : "#16a34a",
                 color: "white",
                 fontSize: 24,
                 fontWeight: 900,
                 marginBottom: 8,
               }}
             >
-              ✓
+              {confirmationMessage.includes("No emergency alert was sent")
+                ? "i"
+                : "✓"}
             </div>
 
             <div
               style={{
                 fontSize: 20,
                 fontWeight: 900,
-                color: "#166534",
+                color: confirmationMessage.includes(
+                  "No emergency alert was sent",
+                )
+                  ? "#1e40af"
+                  : "#166534",
               }}
             >
-              Emergency Alert Sent
+              {confirmationMessage.includes("No emergency alert was sent")
+                ? "Safety Confirmed"
+                : "Emergency Alert Sent"}
             </div>
 
             <div
@@ -1097,41 +1156,44 @@ export default function FallDetectionPage() {
                 marginTop: 8,
                 fontSize: 14,
                 color: "#475467",
+                lineHeight: 1.5,
               }}
             >
-              {selectedResident?.full_name || "Resident"} has been reported to
-              the care team.
+              {confirmationMessage}
             </div>
 
-            <div
-              style={{
-                marginTop: 14,
-                padding: 12,
-                background: "white",
-                borderRadius: 12,
-                fontSize: 13,
-                color: "#166534",
-                fontWeight: 700,
-                lineHeight: 1.8,
-              }}
-            >
-              Staff notified
-              <br />
-              Family emergency process started
-              <br />
-              SMS / WhatsApp / Voice attempted
-            </div>
+            {alertSent &&
+              !confirmationMessage.includes("No emergency alert was sent") && (
+                <div
+                  style={{
+                    marginTop: 14,
+                    padding: 12,
+                    background: "white",
+                    borderRadius: 12,
+                    fontSize: 13,
+                    color: "#166534",
+                    fontWeight: 700,
+                    lineHeight: 1.8,
+                  }}
+                >
+                  Staff live dashboard notified
+                  <br />
+                  Family emergency process started
+                  <br />
+                  SMS / WhatsApp / Voice attempted
+                </div>
+              )}
 
             <button
-              onClick={() => setAlertSent(false)}
+              onClick={continueMonitoring}
               style={{
                 width: "100%",
                 padding: 12,
                 marginTop: 14,
                 borderRadius: 10,
-                border: "1px solid #bbf7d0",
+                border: "1px solid #d0d5dd",
                 background: "white",
-                color: "#166534",
+                color: "#344054",
                 fontWeight: 800,
                 cursor: "pointer",
               }}
