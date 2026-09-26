@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 
 type Resident = {
+  id: string;
   full_name: string;
   room_number: string | null;
 };
@@ -12,21 +13,67 @@ type FallEvent = {
   id: string;
   resident_id: string | null;
   device_id: string | null;
-  z_drop: number | null;
-  doppler_spike: number | null;
   status: string | null;
-  created_at: string;
-  residents?: Resident | Resident[] | null;
+  triggered_at: string | null;
+};
+
+type AlertWithResident = FallEvent & {
+  resident: Resident | null;
 };
 
 export default function LiveAlerts() {
-  const [alerts, setAlerts] = useState<FallEvent[]>([]);
+  const [alerts, setAlerts] = useState<AlertWithResident[]>([]);
   const [loading, setLoading] = useState(true);
   const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [connectionStatus, setConnectionStatus] = useState("Connecting");
 
   useEffect(() => {
     const supabase = createClient();
+
+    async function getResidents(
+      residentIds: string[],
+    ): Promise<Map<string, Resident>> {
+      const residentMap = new Map<string, Resident>();
+
+      const uniqueIds = Array.from(new Set(residentIds.filter(Boolean)));
+
+      if (uniqueIds.length === 0) {
+        return residentMap;
+      }
+
+      const { data, error } = await supabase
+        .from("residents")
+        .select("id, full_name, room_number")
+        .in("id", uniqueIds);
+
+      if (error) {
+        console.error("Failed to load residents:", error);
+        return residentMap;
+      }
+
+      for (const resident of data || []) {
+        residentMap.set(resident.id, resident as Resident);
+      }
+
+      return residentMap;
+    }
+
+    async function attachResidents(
+      events: FallEvent[],
+    ): Promise<AlertWithResident[]> {
+      const residentIds = events
+        .map((event) => event.resident_id)
+        .filter((id): id is string => Boolean(id));
+
+      const residentMap = await getResidents(residentIds);
+
+      return events.map((event) => ({
+        ...event,
+        resident: event.resident_id
+          ? residentMap.get(event.resident_id) || null
+          : null,
+      }));
+    }
 
     async function loadAlerts() {
       setLoading(true);
@@ -39,18 +86,12 @@ export default function LiveAlerts() {
               id,
               resident_id,
               device_id,
-              z_drop,
-              doppler_spike,
               status,
-              created_at,
-              residents (
-                full_name,
-                room_number
-              )
+              triggered_at
             `,
           )
           .in("status", ["unresolved", "active"])
-          .order("created_at", {
+          .order("triggered_at", {
             ascending: false,
           });
 
@@ -60,7 +101,11 @@ export default function LiveAlerts() {
           return;
         }
 
-        setAlerts((data || []) as FallEvent[]);
+        const events = (data || []) as FallEvent[];
+
+        const alertsWithResidents = await attachResidents(events);
+
+        setAlerts(alertsWithResidents);
       } catch (error) {
         console.error("Emergency alert loading error:", error);
         setAlerts([]);
@@ -70,8 +115,8 @@ export default function LiveAlerts() {
     }
 
     async function loadSingleAlert(
-      alert: FallEvent,
-    ): Promise<FallEvent | null> {
+      event: FallEvent,
+    ): Promise<AlertWithResident | null> {
       try {
         const { data, error } = await supabase
           .from("fall_events")
@@ -80,30 +125,34 @@ export default function LiveAlerts() {
               id,
               resident_id,
               device_id,
-              z_drop,
-              doppler_spike,
               status,
-              created_at,
-              residents (
-                full_name,
-                room_number
-              )
+              triggered_at
             `,
           )
-          .eq("id", alert.id)
+          .eq("id", event.id)
           .single();
 
-        if (error) {
+        if (error || !data) {
           console.error("Failed to load emergency details:", error);
 
-          return alert;
+          return {
+            ...event,
+            resident: null,
+          };
         }
 
-        return data as FallEvent;
+        const completeEvent = data as FallEvent;
+
+        const alertsWithResidents = await attachResidents([completeEvent]);
+
+        return alertsWithResidents[0] || null;
       } catch (error) {
         console.error("Emergency detail loading error:", error);
 
-        return alert;
+        return {
+          ...event,
+          resident: null,
+        };
       }
     }
 
@@ -121,26 +170,28 @@ export default function LiveAlerts() {
         async (payload) => {
           console.log("New fall event:", payload.new);
 
-          const event = await loadSingleAlert(payload.new as FallEvent);
-
-          if (!event) {
-            return;
-          }
+          const event = payload.new as FallEvent;
 
           if (event.status !== "unresolved" && event.status !== "active") {
             return;
           }
 
+          const completeAlert = await loadSingleAlert(event);
+
+          if (!completeAlert) {
+            return;
+          }
+
           setAlerts((current) => {
             const alreadyExists = current.some(
-              (alert) => alert.id === event.id,
+              (alert) => alert.id === completeAlert.id,
             );
 
             if (alreadyExists) {
               return current;
             }
 
-            return [event, ...current];
+            return [completeAlert, ...current];
           });
         },
       )
@@ -152,6 +203,8 @@ export default function LiveAlerts() {
           table: "fall_events",
         },
         async (payload) => {
+          console.log("Updated fall event:", payload.new);
+
           const updated = payload.new as FallEvent;
 
           if (
@@ -169,23 +222,23 @@ export default function LiveAlerts() {
             return;
           }
 
-          const completeEvent = await loadSingleAlert(updated);
+          const completeAlert = await loadSingleAlert(updated);
 
-          if (!completeEvent) {
+          if (!completeAlert) {
             return;
           }
 
           setAlerts((current) => {
             const exists = current.some(
-              (alert) => alert.id === completeEvent.id,
+              (alert) => alert.id === completeAlert.id,
             );
 
             if (!exists) {
-              return [completeEvent, ...current];
+              return [completeAlert, ...current];
             }
 
             return current.map((alert) =>
-              alert.id === completeEvent.id ? completeEvent : alert,
+              alert.id === completeAlert.id ? completeAlert : alert,
             );
           });
         },
@@ -239,28 +292,36 @@ export default function LiveAlerts() {
     }
   }
 
-  function getResident(alert: FallEvent): Resident | null {
-    if (!alert.residents) {
-      return null;
+  function formatTime(timestamp: string | null | undefined) {
+    if (!timestamp) {
+      return "Time unavailable";
     }
 
-    if (Array.isArray(alert.residents)) {
-      return alert.residents[0] || null;
+    const date = new Date(timestamp);
+
+    if (Number.isNaN(date.getTime())) {
+      return "Time unavailable";
     }
 
-    return alert.residents;
-  }
-
-  function formatTime(timestamp: string) {
-    return new Date(timestamp).toLocaleTimeString([], {
+    return date.toLocaleTimeString([], {
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
     });
   }
 
-  function formatDate(timestamp: string) {
-    return new Date(timestamp).toLocaleDateString([], {
+  function formatDate(timestamp: string | null | undefined) {
+    if (!timestamp) {
+      return "Date unavailable";
+    }
+
+    const date = new Date(timestamp);
+
+    if (Number.isNaN(date.getTime())) {
+      return "Date unavailable";
+    }
+
+    return date.toLocaleDateString([], {
       day: "2-digit",
       month: "short",
       year: "numeric",
@@ -270,169 +331,189 @@ export default function LiveAlerts() {
   return (
     <section className="w-full">
       {/* Header */}
-      <div className="mb-6 rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div className="flex flex-col gap-5 p-5 sm:p-6 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <div className="flex flex-wrap items-center gap-3">
-              <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">
-                Emergency Monitoring
-              </h1>
-
-              {alerts.length > 0 ? (
-                <div className="flex items-center gap-2 rounded-full border border-red-200 bg-red-50 px-3 py-1.5">
-                  <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-red-500" />
-
-                  <span className="text-xs font-bold uppercase tracking-wide text-red-700">
-                    Live Emergency
-                  </span>
-                </div>
-              ) : (
-                <div className="flex items-center gap-2 rounded-full border border-green-200 bg-green-50 px-3 py-1.5">
-                  <span className="h-2.5 w-2.5 rounded-full bg-green-500" />
-
-                  <span className="text-xs font-bold uppercase tracking-wide text-green-700">
-                    System Clear
-                  </span>
-                </div>
-              )}
+      <div
+        className={`rounded-t-2xl border px-6 py-6 ${
+          alerts.length > 0
+            ? "border-red-200 bg-red-50"
+            : "border-slate-200 bg-white"
+        }`}
+      >
+        <div className="flex items-center justify-between gap-6">
+          <div className="flex items-center gap-4">
+            <div
+              className={`flex h-14 w-14 items-center justify-center rounded-full ${
+                alerts.length > 0 ? "bg-red-600" : "bg-slate-200"
+              }`}
+            >
+              <div className="h-4 w-4 rounded-full bg-white" />
             </div>
 
-            <p className="mt-2 text-sm text-slate-500">
-              Real-time fall detection and emergency response
-            </p>
+            <div>
+              <div className="flex items-center gap-2">
+                <h2
+                  className={`text-2xl font-semibold ${
+                    alerts.length > 0 ? "text-red-800" : "text-slate-900"
+                  }`}
+                >
+                  {alerts.length > 0
+                    ? "Live Emergency"
+                    : "Emergency Monitoring"}
+                </h2>
 
-            <div className="mt-3 flex items-center gap-2 text-xs">
-              <span
-                className={`h-2 w-2 rounded-full ${
-                  connectionStatus === "Connected"
-                    ? "bg-green-500"
-                    : connectionStatus === "Connection Error"
-                      ? "bg-red-500"
-                      : "bg-amber-500"
+                {alerts.length > 0 && (
+                  <span className="h-2.5 w-2.5 rounded-full bg-red-500" />
+                )}
+              </div>
+
+              <p
+                className={`mt-1 ${
+                  alerts.length > 0 ? "text-red-600" : "text-slate-500"
                 }`}
-              />
-
-              <span className="text-slate-500">
-                Realtime:{" "}
-                <span className="font-medium text-slate-700">
-                  {connectionStatus}
-                </span>
-              </span>
+              >
+                {alerts.length > 0
+                  ? "Fall detection event requires immediate attention"
+                  : "Monitoring resident safety events in real time"}
+              </p>
             </div>
           </div>
 
-          <div className="min-w-[140px] rounded-xl border border-slate-200 bg-slate-50 px-5 py-4 text-center">
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-              Active Alerts
+          <div
+            className={`rounded-xl border px-6 py-3 text-center ${
+              alerts.length > 0
+                ? "border-red-200 bg-white"
+                : "border-slate-200 bg-slate-50"
+            }`}
+          >
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+              Status
             </p>
 
             <p
-              className={`mt-1 text-3xl font-bold ${
-                alerts.length > 0 ? "text-red-600" : "text-slate-900"
+              className={`mt-1 text-lg font-bold ${
+                alerts.length > 0 ? "text-red-600" : "text-slate-700"
               }`}
             >
-              {alerts.length}
+              {alerts.length > 0 ? "ACTIVE" : "CLEAR"}
             </p>
           </div>
         </div>
       </div>
 
-      {/* Loading */}
-      {loading && (
-        <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center shadow-sm">
-          <div className="mx-auto h-8 w-8 animate-spin rounded-full border-4 border-slate-200 border-t-slate-700" />
+      {/* Connection / Alert summary */}
+      <div className="border-x border-slate-200 bg-white px-6 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-2 text-sm">
+            <span
+              className={`h-2.5 w-2.5 rounded-full ${
+                connectionStatus === "Connected"
+                  ? "bg-green-500"
+                  : connectionStatus === "Connection Error"
+                    ? "bg-red-500"
+                    : "bg-yellow-500"
+              }`}
+            />
 
-          <p className="mt-4 text-sm text-slate-500">
-            Loading emergency monitoring...
-          </p>
-        </div>
-      )}
-
-      {/* No Alerts */}
-      {!loading && alerts.length === 0 && (
-        <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center shadow-sm">
-          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full border border-green-200 bg-green-50">
-            <span className="h-4 w-4 rounded-full bg-green-500" />
+            <span className="text-slate-600">
+              Realtime:{" "}
+              <span className="font-medium text-slate-900">
+                {connectionStatus}
+              </span>
+            </span>
           </div>
 
-          <h2 className="mt-5 text-lg font-bold text-slate-900">
-            No Active Emergencies
-          </h2>
-
-          <p className="mx-auto mt-2 max-w-lg text-sm leading-6 text-slate-500">
-            The emergency monitoring system is active. New fall events will
-            appear here automatically.
-          </p>
-
-          <div className="mx-auto mt-5 flex w-fit items-center gap-2 rounded-full border border-green-200 bg-green-50 px-4 py-2">
-            <span className="h-2 w-2 rounded-full bg-green-500" />
-
-            <span className="text-sm font-medium text-green-700">
-              Live monitoring active
+          <div className="text-sm text-slate-500">
+            Active alerts:{" "}
+            <span className="font-semibold text-slate-900">
+              {alerts.length}
             </span>
           </div>
         </div>
-      )}
+      </div>
 
-      {/* Active Alerts */}
-      {!loading && alerts.length > 0 && (
-        <div className="space-y-5">
-          {alerts.map((alert) => {
-            const resident = getResident(alert);
+      {/* Content */}
+      <div className="rounded-b-2xl border border-t-0 border-slate-200 bg-white p-6">
+        {loading ? (
+          <div className="flex min-h-[180px] items-center justify-center">
+            <div className="text-center">
+              <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-slate-300 border-t-slate-900" />
+              <p className="mt-4 text-sm text-slate-500">
+                Loading emergency alerts...
+              </p>
+            </div>
+          </div>
+        ) : alerts.length === 0 ? (
+          <div className="flex min-h-[180px] items-center justify-center">
+            <div className="text-center">
+              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-green-50">
+                <svg
+                  className="h-7 w-7 text-green-600"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M5 13l4 4L19 7"
+                  />
+                </svg>
+              </div>
 
-            return (
-              <article
-                key={alert.id}
-                className="overflow-hidden rounded-2xl border border-red-200 bg-white shadow-md"
-              >
-                {/* Emergency Header */}
-                <div className="border-b border-red-200 bg-red-50 px-5 py-5 sm:px-6">
-                  <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="flex items-center gap-4">
-                      <div className="relative flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-red-600">
-                        <span className="h-3 w-3 rounded-full bg-white" />
+              <h3 className="mt-4 text-lg font-semibold text-slate-900">
+                No active emergencies
+              </h3>
 
-                        <span className="absolute inset-0 animate-ping rounded-full bg-red-500 opacity-30" />
-                      </div>
+              <p className="mt-1 text-sm text-slate-500">
+                The system is currently monitoring all fall detection events.
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-5">
+            {alerts.map((alert) => {
+              const resident = alert.resident;
 
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <h2 className="text-lg font-bold text-red-900">
-                            Live Emergency
-                          </h2>
-
-                          <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
+              return (
+                <div
+                  key={alert.id}
+                  className="overflow-hidden rounded-2xl border border-red-200 bg-white shadow-sm"
+                >
+                  {/* Alert top */}
+                  <div className="border-b border-red-100 bg-red-50 px-5 py-4">
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-red-600">
+                          <div className="h-3 w-3 rounded-full bg-white" />
                         </div>
 
-                        <p className="mt-1 text-sm text-red-700">
-                          Fall detection event requires immediate attention
-                        </p>
+                        <div>
+                          <p className="font-semibold text-red-800">
+                            Fall Event
+                          </p>
+
+                          <p className="text-sm text-red-600">
+                            Immediate attention required
+                          </p>
+                        </div>
                       </div>
-                    </div>
 
-                    <div className="w-fit rounded-lg border border-red-200 bg-white px-4 py-2">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-red-500">
-                        Status
-                      </p>
-
-                      <p className="mt-0.5 text-sm font-bold text-red-700">
-                        ACTIVE
-                      </p>
+                      <span className="rounded-full bg-red-100 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-red-700">
+                        Active
+                      </span>
                     </div>
                   </div>
-                </div>
 
-                {/* Details */}
-                <div className="p-5 sm:p-6">
-                  <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                  {/* Main information */}
+                  <div className="grid grid-cols-1 gap-4 p-5 md:grid-cols-2 lg:grid-cols-4">
                     {/* Resident */}
                     <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
                       <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                         Resident
                       </p>
 
-                      <p className="mt-2 text-base font-bold text-slate-900">
-                        {resident?.full_name || "Unknown Resident"}
+                      <p className="mt-2 text-lg font-semibold text-slate-900">
+                        {resident?.full_name || "Resident unavailable"}
                       </p>
 
                       {resident?.room_number && (
@@ -442,18 +523,18 @@ export default function LiveAlerts() {
                       )}
                     </div>
 
-                    {/* Detection Time */}
+                    {/* Detected */}
                     <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
                       <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                         Detected
                       </p>
 
-                      <p className="mt-2 text-base font-bold text-slate-900">
-                        {formatTime(alert.created_at)}
+                      <p className="mt-2 text-lg font-semibold text-slate-900">
+                        {formatDate(alert.triggered_at)}
                       </p>
 
                       <p className="mt-1 text-sm text-slate-500">
-                        {formatDate(alert.created_at)}
+                        {formatTime(alert.triggered_at)}
                       </p>
                     </div>
 
@@ -463,7 +544,7 @@ export default function LiveAlerts() {
                         Device
                       </p>
 
-                      <p className="mt-2 text-base font-bold text-slate-900">
+                      <p className="mt-2 text-lg font-semibold uppercase text-slate-900">
                         {alert.device_id || "PHONE"}
                       </p>
 
@@ -472,61 +553,28 @@ export default function LiveAlerts() {
                       </p>
                     </div>
 
-                    {/* Detection Type */}
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                    {/* Detection */}
+                    <div className="rounded-xl border border-red-200 bg-red-50 p-4">
                       <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                         Detection
                       </p>
 
-                      <p className="mt-2 text-base font-bold text-red-600">
+                      <p className="mt-2 text-lg font-semibold text-red-600">
                         Fall Event
                       </p>
 
-                      <p className="mt-1 text-sm text-slate-500">Automatic</p>
+                      <p className="mt-1 text-sm text-red-600">Automatic</p>
                     </div>
                   </div>
 
-                  {/* Technical Details */}
-                  <div className="mt-5 rounded-xl border border-slate-200 bg-white p-4">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      Event Details
-                    </p>
-
-                    <div className="mt-4 grid gap-4 sm:grid-cols-3">
-                      <div>
-                        <p className="text-xs text-slate-400">Event ID</p>
-
-                        <p className="mt-1 break-all font-mono text-xs text-slate-600">
-                          {alert.id}
-                        </p>
-                      </div>
-
-                      <div>
-                        <p className="text-xs text-slate-400">Z-Drop</p>
-
-                        <p className="mt-1 text-sm font-semibold text-slate-700">
-                          {alert.z_drop ?? "Not available"}
-                        </p>
-                      </div>
-
-                      <div>
-                        <p className="text-xs text-slate-400">Doppler Spike</p>
-
-                        <p className="mt-1 text-sm font-semibold text-slate-700">
-                          {alert.doppler_spike ?? "Not available"}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Action */}
-                  <div className="mt-5 flex flex-col gap-4 border-t border-slate-100 pt-5 sm:flex-row sm:items-center sm:justify-between">
+                  {/* Bottom action */}
+                  <div className="flex flex-col gap-4 border-t border-slate-200 px-5 py-5 md:flex-row md:items-center md:justify-between">
                     <div>
-                      <p className="text-sm font-semibold text-slate-800">
+                      <p className="font-semibold text-slate-900">
                         Immediate attention required
                       </p>
 
-                      <p className="mt-1 text-xs text-slate-500">
+                      <p className="mt-1 text-sm text-slate-500">
                         Verify the resident before resolving this alert.
                       </p>
                     </div>
@@ -535,7 +583,7 @@ export default function LiveAlerts() {
                       type="button"
                       onClick={() => resolveAlert(alert.id)}
                       disabled={resolvingId === alert.id}
-                      className="rounded-xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="rounded-xl bg-slate-900 px-6 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       {resolvingId === alert.id
                         ? "Resolving..."
@@ -543,11 +591,11 @@ export default function LiveAlerts() {
                     </button>
                   </div>
                 </div>
-              </article>
-            );
-          })}
-        </div>
-      )}
+              );
+            })}
+          </div>
+        )}
+      </div>
     </section>
   );
 }
